@@ -1,6 +1,7 @@
 //! lmatrix: a Matrix-rain style log viewer.
 
 pub mod backlog;
+pub mod config;
 pub mod line;
 pub mod rules;
 pub mod sim;

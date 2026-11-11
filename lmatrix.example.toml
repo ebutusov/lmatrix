@@ -1,0 +1,73 @@
+# lmatrix configuration
+#
+# Location (first one found wins):
+#   --config <path>
+#   $XDG_CONFIG_HOME/lmatrix/config.toml  (or ~/.config/lmatrix/config.toml)
+#   /etc/lmatrix/config.toml
+#
+# Every value below is the built-in default. Unknown keys are an error.
+# Durations are written like "480ms", "5s", "2m". Colors are "#rrggbb".
+
+[display]
+fps = 20                  # frames per second, 5..60
+color = "auto"            # auto | truecolor | 256 | 16
+                          # auto: COLORTERM=truecolor/24bit -> truecolor,
+                          # TERM contains 256color -> 256, otherwise 16.
+                          # COLORTERM is often not forwarded over SSH:
+                          # set this explicitly if colors look wrong.
+default_color = "#28ff6e" # rain color for lines that match no rule
+ascii_only = false        # replace every non-ASCII character with '?'
+window_lines = 2          # backlog window rows at the bottom, 0 hides it (0..20)
+
+[rain]
+speed = 16                # rows per second (0.5..200)
+speed_jitter = 0.35       # 0..0.9, random speed variation per drop
+fill = 0.35               # 0.01..1.0, share of columns with an active drop
+fade_half_life = "480ms"  # brightness half-life of a written cell (10ms..60s)
+replay = true             # replay old lines when live lines do not fill the rain
+replay_brightness = 0.55  # 0.1..1.0, brightness of replayed trails
+replay_reserve = 0.15     # 0..1.0, share of drop slots kept free for live lines
+
+[tail]
+backlog = 10000           # lines kept in memory (1..10000000)
+preload = 200             # lines read at startup per journald/file source (0..100000)
+
+# Sources. Each source may set `label = "name"` to prefix its lines with
+# "name: ". Without any [[source]] section, a single journald source is used.
+
+[[source]]
+type = "journald"         # runs journalctl -f -o json
+units = []                # e.g. ["ssh.service", "nginx.service"]; empty = everything
+# label = "sys"
+
+# [[source]]
+# type = "file"
+# path = "/var/log/myapp/*.log"   # a glob, re-evaluated every 5 seconds
+
+# [[source]]
+# type = "command"
+# run = "docker logs -f web"      # run through sh -c; stdout and stderr are read
+# restart = true                  # start again when it exits
+# restart_delay = "5s"            # at least 100ms
+
+# Rules, tested in order; the first match wins. `pattern` uses Rust regex
+# syntax and is case-sensitive unless it starts with (?i).
+# hold: omitted or "0s" = color only; a duration = decode and keep the line
+# on screen that long; "ack" = keep it until acknowledged with a / A.
+
+# [[rule]]
+# name = "oom"
+# pattern = "(?i)out of memory|oom-killer"
+# color = "#ff463c"
+# hold = "ack"
+
+# [[rule]]
+# name = "auth-fail"
+# pattern = "Failed password for \\S+"
+# color = "#ffb428"
+# hold = "30s"
+
+# [[rule]]
+# name = "login"
+# pattern = "Accepted publickey"
+# color = "#3cc8ff"

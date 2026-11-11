@@ -7,7 +7,15 @@ use std::sync::mpsc::SyncSender;
 
 use chrono::{DateTime, Local};
 
+use crate::config::SourceConfig;
 use crate::line::{LogLine, SourceId, SourceMsg, sanitize};
+
+/// Starts the thread for one configured source.
+pub fn spawn(config: &SourceConfig, context: SourceContext, preload: usize) {
+	let _ = (config, preload);
+	context.report_error("this source type is not implemented yet");
+	context.preload_done();
+}
 
 /// Capacity of the channel between sources and the main loop.
 pub const CHANNEL_CAPACITY: usize = 8192;
