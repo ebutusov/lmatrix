@@ -91,8 +91,14 @@ fn install_panic_hook() {
 	}
 	let previous_hook = std::panic::take_hook();
 	std::panic::set_hook(Box::new(move |info| {
-		restore_terminal();
-		previous_hook(info);
+		// A panic in another thread (for example a source) only ends that
+		// thread; the UI keeps running, so the terminal must stay as it is
+		// and nothing may be printed over the screen.
+		let on_main_thread = std::thread::current().name() == Some("main");
+		if on_main_thread || !TERMINAL_ACTIVE.load(Ordering::SeqCst) {
+			restore_terminal();
+			previous_hook(info);
+		}
 	}));
 }
 

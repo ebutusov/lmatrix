@@ -91,7 +91,7 @@ check "shell usable after Ctrl-C" 'shell_usable'
 
 # A panic restores the terminal.
 start "$PANIC_BIN 2>$WORK/panic.txt" 1.5
-check "panic restores the terminal" 'restored && grep -q "deliberate panic" "$WORK/panic.txt"'
+check "panic restores the terminal" 'restored && grep -q "deliberate panic" "$WORK/panic.txt" && ! grep -q "worker" "$WORK/panic.txt"'
 check "shell usable after panic" 'shell_usable'
 
 # Escape sequences in log lines cannot reach the terminal.
