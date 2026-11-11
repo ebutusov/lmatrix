@@ -124,9 +124,49 @@ impl ColorMode {
 				}
 			}
 			_ if head => self.solid(head_color),
-			_ => self.solid(color.scale(level)),
+			ColorMode::Palette256 => TermColor::Indexed(shade_256(color, level)),
+			ColorMode::TrueColor => self.solid(color.scale(level)),
 		}
 	}
+}
+
+/// Index of the nearest cube level (0..6) for one channel.
+fn nearest_cube_level(channel: u8) -> usize {
+	CUBE_LEVELS
+		.iter()
+		.enumerate()
+		.min_by_key(|(_, level)| (**level as i32 - channel as i32).abs())
+		.map(|(index, _)| index)
+		.unwrap_or(0)
+}
+
+/// Shades a rain color for the 256-color palette.
+///
+/// The cube has no level between 0 and 95, so plain quantizing turns every
+/// faint cell black and cuts trails short. Colored (non-gray) rain stays in
+/// the cube and never goes below the darkest cube color of its hue, so a
+/// trail fades to dark green (for the default color) instead of ending early.
+fn shade_256(color: Rgb, level: f32) -> u8 {
+	let scaled = color.scale(level);
+	let max_channel = color.0.max(color.1).max(color.2);
+	let min_channel = color.0.min(color.1).min(color.2);
+	let grayish = max_channel == 0 || (max_channel - min_channel) < max_channel / 4;
+	if grayish {
+		return nearest_256(scaled);
+	}
+	let mut indices = [
+		nearest_cube_level(scaled.0),
+		nearest_cube_level(scaled.1),
+		nearest_cube_level(scaled.2),
+	];
+	if indices == [0, 0, 0] {
+		// Darkest color of the same hue: level 1 on the dominant channels.
+		let base = [color.0, color.1, color.2];
+		for (index, channel) in base.iter().enumerate() {
+			indices[index] = usize::from(*channel as u32 * 2 >= max_channel as u32);
+		}
+	}
+	(16 + 36 * indices[0] + 6 * indices[1] + indices[2]) as u8
 }
 
 /// Index of the nearest color in the 256-color palette (cube or gray ramp).
@@ -249,6 +289,39 @@ mod tests {
 		let red = Rgb(0xff, 0x46, 0x3c);
 		assert_eq!(mode.shade(red, 0.8, false, Rgb::WHITE), TermColor::Basic(9));
 		assert_eq!(mode.shade(red, 0.2, false, Rgb::WHITE), TermColor::Basic(1));
+	}
+
+	#[test]
+	fn faint_256_rain_keeps_its_hue() {
+		let green = Rgb(0x28, 0xff, 0x6e);
+		let mode = ColorMode::Palette256;
+		// Bright cells quantize as before.
+		assert_eq!(
+			mode.shade(green, 1.0, false, Rgb::WHITE),
+			TermColor::Indexed(47)
+		);
+		// Faint cells used to turn black (16); now they stay dark green (22).
+		for level in [0.18, 0.1, 0.06] {
+			assert_eq!(
+				mode.shade(green, level, false, Rgb::WHITE),
+				TermColor::Indexed(22),
+				"level {level}"
+			);
+		}
+		// Red rain fades to dark red, amber to dark olive.
+		assert_eq!(
+			mode.shade(Rgb(0xff, 0x46, 0x3c), 0.1, false, Rgb::WHITE),
+			TermColor::Indexed(52)
+		);
+		assert_eq!(
+			mode.shade(Rgb(0xff, 0xb4, 0x28), 0.1, false, Rgb::WHITE),
+			TermColor::Indexed(58)
+		);
+		// Gray rain still uses the gray ramp.
+		assert_eq!(
+			mode.shade(Rgb(200, 200, 200), 0.1, false, Rgb::WHITE),
+			TermColor::Indexed(nearest_256(Rgb(20, 20, 20)))
+		);
 	}
 
 	#[test]
