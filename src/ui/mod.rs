@@ -321,7 +321,11 @@ impl App {
 	fn compose(&mut self) {
 		self.frame.clear();
 		if self.layout.too_small {
-			let message = "terminal too small";
+			let message = if self.layout.cols >= 18 {
+				"terminal too small"
+			} else {
+				"too small"
+			};
 			let start = self.layout.cols.saturating_sub(message.len() as u16) / 2;
 			self.frame.put_str(
 				start,
