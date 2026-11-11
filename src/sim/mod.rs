@@ -6,9 +6,11 @@
 pub mod caught;
 pub mod rain;
 
+use std::borrow::Cow;
 use std::time::Duration;
 
 use fastrand::Rng;
+use regex::Regex;
 
 use crate::backlog::{Backlog, Entry};
 use crate::line::LogLine;
@@ -36,6 +38,8 @@ pub struct SimSettings {
 	pub replay_reserve: f32,
 	/// Replays pick from this many newest backlog lines.
 	pub replay_window: usize,
+	/// The first match is removed from the text shown in the rain.
+	pub strip_pattern: Option<Regex>,
 	pub default_color: Rgb,
 	pub backlog: usize,
 	pub ascii_only: bool,
@@ -52,6 +56,7 @@ impl Default for SimSettings {
 			replay_brightness: 0.55,
 			replay_reserve: 0.15,
 			replay_window: 100,
+			strip_pattern: None,
 			default_color: Rgb(0x28, 0xff, 0x6e),
 			backlog: 10_000,
 			ascii_only: false,
@@ -165,9 +170,10 @@ impl Sim {
 				// Matched lines always rain; the cap only guards against a
 				// flood of matching lines piling up thousands of drops.
 				if self.rain.active_drops() < self.max_forced_drops() {
+					let text = rain_text(&self.settings.strip_pattern, &line.text);
 					self.rain.spawn(
 						DropSpec {
-							text: &line.text,
+							text: &text,
 							color,
 							replay: false,
 							offset: 0,
@@ -188,9 +194,10 @@ impl Sim {
 			}
 			None => {
 				if self.rain.active_drops() < self.max_drops() {
+					let text = rain_text(&self.settings.strip_pattern, &line.text);
 					self.rain.spawn(
 						DropSpec {
-							text: &line.text,
+							text: &text,
 							color: self.settings.default_color,
 							replay: false,
 							offset: 0,
@@ -258,7 +265,9 @@ impl Sim {
 			let window = self.settings.replay_window.clamp(1, self.backlog.len());
 			let index = self.backlog.len() - 1 - self.rng.usize(..window);
 			let text = match self.backlog.get(index) {
-				Some(entry) => entry.line.text.clone(),
+				Some(entry) => {
+					rain_text(&self.settings.strip_pattern, &entry.line.text).into_owned()
+				}
 				None => return,
 			};
 			let length = text.chars().count().max(1);
@@ -276,6 +285,31 @@ impl Sim {
 				&mut self.rng,
 			);
 		}
+	}
+}
+
+/// The text a drop shows: the line with the first match of `strip_pattern`
+/// removed. Falls back to the full line if nothing would be left.
+fn rain_text<'a>(strip_pattern: &Option<Regex>, text: &'a str) -> Cow<'a, str> {
+	let Some(found) = strip_pattern
+		.as_ref()
+		.and_then(|pattern| pattern.find(text))
+	else {
+		return Cow::Borrowed(text);
+	};
+	if found.start() == 0 {
+		let rest = &text[found.end()..];
+		return if rest.trim().is_empty() {
+			Cow::Borrowed(text)
+		} else {
+			Cow::Borrowed(rest)
+		};
+	}
+	let stripped = format!("{}{}", &text[..found.start()], &text[found.end()..]);
+	if stripped.trim().is_empty() {
+		Cow::Borrowed(text)
+	} else {
+		Cow::Owned(stripped)
 	}
 }
 
@@ -445,6 +479,66 @@ mod tests {
 		assert!(nonzero_offset);
 		assert_eq!(sim.caught_lines().len(), 0);
 		assert_eq!(sim.ack_count(), 0);
+	}
+
+	fn stripping() -> SimSettings {
+		SimSettings {
+			strip_pattern: Some(Regex::new(r"^[^:]*:\s*").unwrap()),
+			..no_replay()
+		}
+	}
+
+	#[test]
+	fn rain_text_strips_first_match() {
+		let header = Some(Regex::new(r"^[^:]*:\s*").unwrap());
+		assert_eq!(
+			rain_text(&header, "sshd[42]: Accepted publickey"),
+			"Accepted publickey"
+		);
+		assert_eq!(
+			rain_text(&header, "kernel: eth0: Link is Up"),
+			"eth0: Link is Up"
+		);
+		assert_eq!(rain_text(&header, "no header here"), "no header here");
+		assert_eq!(rain_text(&header, "nothing after:"), "nothing after:");
+		assert_eq!(rain_text(&None, "sshd[42]: x"), "sshd[42]: x");
+		let middle = Some(Regex::new(r"\[\d+\]").unwrap());
+		assert_eq!(rain_text(&middle, "sshd[42]: x"), "sshd: x");
+	}
+
+	#[test]
+	fn stripped_drops_keep_full_line_elsewhere() {
+		let mut sim = sim_with(stripping(), 80, 22);
+		sim.push(line("sshd[42]: CRIT session opened"));
+		let drop_text: String = sim.rain().drops()[0].text().iter().collect();
+		assert_eq!(drop_text, "CRIT session opened");
+		// Rules match, and the backlog and caught line keep, the full line.
+		assert_eq!(sim.backlog().iter().last().unwrap().rule, Some(0));
+		assert_eq!(
+			&*sim.backlog().iter().last().unwrap().line.text,
+			"sshd[42]: CRIT session opened"
+		);
+		sim.tick(FRAME);
+		let caught: String = sim.caught_lines()[0].chars.iter().collect();
+		assert!(caught.contains("sshd[42]: CRIT session opened"));
+	}
+
+	#[test]
+	fn stripped_replays() {
+		let settings = SimSettings {
+			replay: true,
+			..stripping()
+		};
+		let mut sim = sim_with(settings, 80, 22);
+		sim.preload(vec![line("cron[7]: (root) CMD (backup)")]);
+		run(&mut sim, Duration::from_secs(1));
+		assert!(sim.rain().active_drops() > 0);
+		for drop in sim.rain().drops() {
+			assert_eq!(
+				drop.text().iter().collect::<String>(),
+				"(root) CMD (backup)"
+			);
+		}
 	}
 
 	#[test]

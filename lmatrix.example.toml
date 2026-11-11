@@ -30,6 +30,9 @@ replay_reserve = 0.15     # 0..1.0, share of drop slots kept free for live lines
 replay_window = 100       # replays pick from the newest N backlog lines (1..10000000)
 min_brightness = 0.3      # 0..1.0, lowest brightness of a visible trail cell; trails
                           # stay readable to their end, then vanish. 0 = fade to black
+strip_pattern = '^[^:]*:\s*'  # regex; its first match is removed from the text shown
+                          # in the rain (here the "sshd[123]: " header). "" = off.
+                          # The backlog, tail mode and rules keep the full line.
 
 [tail]
 backlog = 10000           # lines kept in memory (1..10000000)

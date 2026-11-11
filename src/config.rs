@@ -13,6 +13,10 @@ use crate::term::Rgb;
 /// The commented default configuration printed by `--print-default-config`.
 pub const DEFAULT_CONFIG: &str = include_str!("../lmatrix.example.toml");
 
+/// Default `rain.strip_pattern`: everything up to the first `:` and the
+/// spaces after it, typically `identifier[pid]: `.
+pub const DEFAULT_STRIP_PATTERN: &str = r"^[^:]*:\s*";
+
 /// Color mode selection.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ColorChoice {
@@ -42,6 +46,8 @@ pub struct RainConfig {
 	pub replay_reserve: f32,
 	pub replay_window: usize,
 	pub min_brightness: f32,
+	/// Regex whose first match is removed from rain text; `None` = off.
+	pub strip_pattern: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -116,6 +122,7 @@ impl Default for Config {
 				replay_reserve: 0.15,
 				replay_window: 100,
 				min_brightness: 0.3,
+				strip_pattern: Some(DEFAULT_STRIP_PATTERN.to_string()),
 			},
 			tail: TailConfig {
 				backlog: 10_000,
@@ -153,6 +160,11 @@ impl Config {
 			replay_brightness: self.rain.replay_brightness,
 			replay_reserve: self.rain.replay_reserve,
 			replay_window: self.rain.replay_window,
+			strip_pattern: self
+				.rain
+				.strip_pattern
+				.as_deref()
+				.map(|pattern| regex::Regex::new(pattern).expect("validated")),
 			default_color: self.display.default_color,
 			backlog: self.tail.backlog,
 			ascii_only: self.display.ascii_only,
@@ -231,6 +243,7 @@ struct RawRain {
 	replay_reserve: Option<f32>,
 	replay_window: Option<usize>,
 	min_brightness: Option<f32>,
+	strip_pattern: Option<String>,
 }
 
 #[derive(Deserialize, Default)]
@@ -342,6 +355,15 @@ impl RawConfig {
 
 		let rain = {
 			let raw = self.rain;
+			let strip_pattern = match raw.strip_pattern {
+				None => defaults.rain.strip_pattern,
+				Some(pattern) if pattern.is_empty() => None,
+				Some(pattern) => {
+					regex::Regex::new(&pattern)
+						.map_err(|error| anyhow!("rain.strip_pattern: invalid regex: {error}"))?;
+					Some(pattern)
+				}
+			};
 			let fade_half_life = match raw.fade_half_life {
 				Some(text) => parse_duration("rain.fade_half_life", &text)?,
 				None => defaults.rain.fade_half_life,
@@ -397,6 +419,7 @@ impl RawConfig {
 					0.0,
 					1.0,
 				)?,
+				strip_pattern,
 			}
 		};
 
@@ -699,6 +722,20 @@ color = "#3cc8ff"
 		assert!(error_of("[[source]]\ntype = \"file\"\n").contains("path"));
 		assert!(error_of("[[source]]\ntype = \"command\"\nrun = \"\"\n").contains("source[0].run"));
 		assert!(error_of("[[rule]]\nname = \"x\"\ncolor = \"#ffffff\"\n").contains("pattern"));
+	}
+
+	#[test]
+	fn strip_pattern_forms() {
+		let default = Config::parse("").unwrap();
+		assert_eq!(
+			default.rain.strip_pattern.as_deref(),
+			Some(DEFAULT_STRIP_PATTERN)
+		);
+		assert!(default.sim_settings().strip_pattern.is_some());
+		let off = Config::parse("[rain]\nstrip_pattern = \"\"\n").unwrap();
+		assert_eq!(off.rain.strip_pattern, None);
+		assert!(off.sim_settings().strip_pattern.is_none());
+		assert!(error_of("[rain]\nstrip_pattern = \"(\"\n").contains("rain.strip_pattern"));
 	}
 
 	#[test]
