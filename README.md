@@ -72,6 +72,28 @@ While frozen, incoming lines are still stored and matched against the rules.
 Their drops and caught lines appear when you unfreeze. The filter applies to
 tail mode only.
 
+### Tuning the rain
+
+Each drop writes one character per row as it falls. Every written character
+starts bright and loses half its brightness every `fade_half_life`. Below
+`min_brightness` it stops getting darker, and it disappears once it would
+have become too faint to see. So the length of a trail is roughly `speed` ×
+the time a character takes to fade out. With the defaults, a live trail is
+about 30 rows and a replayed one about 24. A log line that is shorter than
+the screen repeats from its start, so the text never limits the trail.
+
+| To get | Change |
+|---|---|
+| Longer or shorter trails | `fade_half_life`, for example `"800ms"` or `"1s"` |
+| Faster or slower rain | `speed`; faster drops also leave longer trails |
+| Brighter rain on a quiet host | `replay_brightness`, since most drops are replays there |
+| A smooth fade into black, as in the original design | `min_brightness = 0` |
+| More or fewer drops | `fill` |
+
+The color mode matters too. In 256-color mode the darkest shade of each hue
+is still fairly bright, so trails end with a step instead of a smooth fade.
+Set `color = "truecolor"` if your terminal supports it.
+
 ## Configuration reference
 
 lmatrix uses the first config file it finds:
@@ -147,6 +169,9 @@ restart_delay = "5s"            # at least 100ms
   When a file is rotated or truncated, it is reopened from the start.
 - **command.** Has no preload.
 
+Child processes (`journalctl`, commands, and anything they start) run in their
+own process group and are stopped when lmatrix exits.
+
 Source problems (a command fails to start, a permission error, a file that
 disappears) show up as ordinary lines starting with `lmatrix: `, so you can
 match them with a rule. A failing source never stops the app.
@@ -189,8 +214,17 @@ With `color = "auto"`, lmatrix picks the mode from the environment:
 
 1. If `COLORTERM` is `truecolor` or `24bit`, it uses 24-bit color.
 2. Otherwise, if `TERM` contains `256color`, it uses the 256-color palette.
-3. Otherwise, it uses 16 colors. Rain brightness then maps to the normal or
-   bright variant of the nearest basic color.
+3. Otherwise, it uses 16 colors.
+
+The rain looks a little different in each mode:
+
+- **24-bit color.** Brightness is shown exactly.
+- **256 colors.** Each cell gets the nearest palette color. Faint rain keeps
+  its hue: it never goes darker than the darkest palette shade of its color
+  (dark green for the default color), so trails don't turn gray.
+- **16 colors.** The head is bright white. Other cells use the bright variant
+  of the nearest basic color above half brightness, and the normal variant
+  below.
 
 **`COLORTERM` is usually not forwarded over SSH**, so a truecolor terminal on
 the other end is detected as 256 or 16 colors. Either set the mode in the
@@ -208,9 +242,10 @@ and `AcceptEnv COLORTERM` to the server's `sshd_config`.
 
 lmatrix uses the alternate screen, raw mode, a hidden cursor and disabled
 auto-wrap. All four are restored on quit, on Ctrl-C, on errors, on a panic,
-and on SIGTERM and SIGHUP (a dropped SSH session). Each frame is written in one
-go, wrapped in synchronized-output sequences. Terminals that don't know these
-sequences ignore them.
+and on SIGTERM and SIGHUP. When the terminal itself goes away (a dropped SSH
+session, a killed tmux pane or window), lmatrix notices and exits. Each frame
+is written in one go, wrapped in synchronized-output sequences. Terminals that
+don't know these sequences ignore them.
 
 - **Windows Terminal.** Supports truecolor. It sets `COLORTERM=truecolor`
   locally, but that isn't forwarded over SSH (see above), so set
@@ -228,7 +263,6 @@ sequences ignore them.
     outer terminal and set `color = "truecolor"`:
     `set -as terminal-features ",xterm-256color:RGB"` (tmux 3.2+), or
     `set -ga terminal-overrides ",xterm-256color:Tc"` on older versions.
-  - lmatrix restores the pane when the session or pane is killed.
 - **Small terminals.** Below 20×6, lmatrix shows only `terminal too small`
   until the window grows.
 
@@ -246,5 +280,24 @@ cargo clippy --all-targets -- -D warnings
 
 The `sim` module never touches the terminal, and its random generator is
 seedable, so it is tested deterministically. The `term` module renders frames
-to any `std::io::Write`. An end-to-end check runs the binary in a detached tmux
-session and inspects it with `tmux capture-pane -p`.
+to any `std::io::Write`.
+
+`tests/e2e_tmux.sh` runs the binary in a detached tmux session and inspects
+the screen with `tmux capture-pane -p`. It needs tmux and takes about a
+minute:
+
+```sh
+./tests/e2e_tmux.sh
+```
+
+It checks:
+
+- **Screen:** the help bar, the backlog window and the rain.
+- **Modes and keys:** switching to tail mode and back, and an `ack` rule with
+  the `a` key.
+- **Restore:** the terminal is usable again after `q`, Ctrl-C, SIGTERM, SIGHUP
+  and a panic. The panic case uses `examples/panic_restore.rs`.
+- **Cleanup:** child processes are stopped.
+- **Untrusted input:** escape sequences in log lines are stripped.
+- **Size:** the too-small message, and resizing.
+- **Lost terminal:** the process exits when its terminal is closed.
