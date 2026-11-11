@@ -122,6 +122,11 @@ impl Sim {
 		((self.settings.fill * self.rain.cols() as f32).round() as usize).max(1)
 	}
 
+	/// Upper bound on all drops, including matched lines above the fill cap.
+	pub fn max_forced_drops(&self) -> usize {
+		(self.rain.cols() as usize * 4).max(self.max_drops() + 64)
+	}
+
 	/// Number of active drops below which replays are started.
 	pub fn replay_limit(&self) -> usize {
 		(self.max_drops() as f32 * (1.0 - self.settings.replay_reserve)).floor() as usize
@@ -152,24 +157,28 @@ impl Sim {
 	pub fn push(&mut self, line: LogLine) {
 		let rule_id = self.rules.first_match(&line.text);
 		let speed = self.random_speed();
-		match rule_id.and_then(|id| self.rules.get(id).map(|rule| (id, rule.clone()))) {
-			Some((id, rule)) => {
-				self.rain.spawn(
-					DropSpec {
-						text: &line.text,
-						color: rule.color,
-						replay: false,
-						offset: 0,
-						force: true,
-					},
-					speed,
-					&mut self.rng,
-				);
-				if rule.hold.decodes() {
+		match rule_id.and_then(|id| self.rules.get(id).map(|rule| (id, rule.color, rule.hold))) {
+			Some((id, color, hold)) => {
+				// Matched lines always rain; the cap only guards against a
+				// flood of matching lines piling up thousands of drops.
+				if self.rain.active_drops() < self.max_forced_drops() {
+					self.rain.spawn(
+						DropSpec {
+							text: &line.text,
+							color,
+							replay: false,
+							offset: 0,
+							force: true,
+						},
+						speed,
+						&mut self.rng,
+					);
+				}
+				if hold.decodes() {
 					self.caught.add(CaughtSpec {
 						rule: id,
-						color: rule.color,
-						hold: rule.hold,
+						color,
+						hold,
 						full_text: format!("{} {}", line.ts.format("%H:%M:%S"), line.text),
 					});
 				}

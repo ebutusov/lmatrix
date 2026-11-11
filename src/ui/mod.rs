@@ -1,6 +1,7 @@
 //! Main loop, modes and key handling.
 
 pub mod rain_view;
+pub mod tail_view;
 
 use std::io::{self, Write};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -12,9 +13,11 @@ use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifier
 use crossterm::terminal;
 use fastrand::Rng;
 
+use crate::backlog::Entry;
 use crate::line::{LogLine, SourceMsg};
 use crate::sim::Sim;
 use crate::term::{ColorMode, Frame, Renderer, Rgb, TermColor};
+use tail_view::{TailAction, TailView};
 
 /// Longest time spent waiting for sources to finish preloading.
 const PRELOAD_TIMEOUT: Duration = Duration::from_secs(2);
@@ -27,6 +30,10 @@ const MAX_TICK: Duration = Duration::from_millis(250);
 /// Smallest usable terminal.
 const MIN_COLS: u16 = 20;
 const MIN_ROWS: u16 = 6;
+/// Smallest rain area kept when the backlog window is large.
+const MIN_RAIN_ROWS: u16 = 3;
+/// The backlog window content is refreshed at most this often.
+const WINDOW_REFRESH: Duration = Duration::from_millis(200);
 
 /// Display options for the UI.
 #[derive(Debug, Clone)]
@@ -48,6 +55,11 @@ pub struct Palette {
 	pub marker: TermColor,
 	pub glyph_dim: TermColor,
 	pub error: TermColor,
+	pub window_bg: TermColor,
+	pub window_timestamp: TermColor,
+	pub window_message: TermColor,
+	pub tail_timestamp: TermColor,
+	pub tail_message: TermColor,
 }
 
 impl Palette {
@@ -61,6 +73,11 @@ impl Palette {
 			marker: mode.solid(Rgb::WHITE),
 			glyph_dim: mode.solid(Rgb(0x1e, 0x96, 0x46)),
 			error: mode.solid(Rgb(0xff, 0x46, 0x3c)),
+			window_bg: mode.solid(Rgb(0x0f, 0x33, 0x19)),
+			window_timestamp: mode.solid(Rgb(0x46, 0xa0, 0x64)),
+			window_message: mode.solid(Rgb(0x96, 0xf0, 0xb4)),
+			tail_timestamp: mode.solid(Rgb(0x28, 0x82, 0x4a)),
+			tail_message: mode.solid(Rgb(0x3c, 0xd7, 0x6e)),
 		}
 	}
 
@@ -75,6 +92,7 @@ impl Palette {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Mode {
 	Rain,
+	Tail,
 }
 
 /// Screen geometry.
@@ -85,18 +103,24 @@ struct Layout {
 	too_small: bool,
 	rain_top: u16,
 	rain_rows: u16,
+	window_top: u16,
+	window_rows: u16,
 }
 
 impl Layout {
-	fn new(cols: u16, rows: u16) -> Self {
+	fn new(cols: u16, rows: u16, window_lines: u16) -> Self {
 		let too_small = cols < MIN_COLS || rows < MIN_ROWS;
-		let rain_rows = rows.saturating_sub(1);
+		let below_help = rows.saturating_sub(1);
+		let window_rows = window_lines.min(below_help.saturating_sub(MIN_RAIN_ROWS));
+		let rain_rows = below_help - window_rows;
 		Self {
 			cols,
 			rows,
 			too_small,
 			rain_top: 1,
 			rain_rows,
+			window_top: 1 + rain_rows,
+			window_rows,
 		}
 	}
 }
@@ -108,7 +132,13 @@ struct App {
 	frame: Frame,
 	layout: Layout,
 	mode: Mode,
-	rng: Rng,
+	tail: TailView,
+	frozen: bool,
+	window_lines: u16,
+	ascii_only: bool,
+	/// Newest backlog entries shown in the backlog window.
+	window_entries: Vec<Entry>,
+	window_refreshed: Option<Instant>,
 	quit: bool,
 }
 
@@ -121,7 +151,7 @@ pub fn run(
 	shutdown: &AtomicBool,
 ) -> Result<()> {
 	let (cols, rows) = terminal::size()?;
-	let layout = Layout::new(cols, rows);
+	let layout = Layout::new(cols, rows, options.window_lines);
 	let mut app = App {
 		sim,
 		palette: Palette::new(options.color_mode),
@@ -129,7 +159,12 @@ pub fn run(
 		frame: Frame::new(cols, rows),
 		layout,
 		mode: Mode::Rain,
-		rng: Rng::new(),
+		tail: TailView::new(),
+		frozen: false,
+		window_lines: options.window_lines,
+		ascii_only: options.ascii_only,
+		window_entries: Vec::new(),
+		window_refreshed: None,
 		quit: false,
 	};
 	app.sim.resize(layout.cols, layout.rain_rows);
@@ -152,7 +187,9 @@ pub fn run(
 		let now = Instant::now();
 		let dt = (now - last_tick).min(MAX_TICK);
 		last_tick = now;
-		app.sim.tick(dt);
+		if !app.frozen {
+			app.sim.tick(dt);
+		}
 		app.compose();
 		app.renderer.render(&app.frame, &mut stdout)?;
 
@@ -244,23 +281,38 @@ impl App {
 	}
 
 	fn handle_key(&mut self, key: KeyEvent) {
-		if is_quit_key(&key) {
+		let typing_filter = self.mode == Mode::Tail && self.tail.is_editing();
+		if is_ctrl_c(&key) || (!typing_filter && is_quit_key(&key)) {
 			self.quit = true;
 			return;
 		}
 		match self.mode {
 			Mode::Rain => match key.code {
+				KeyCode::Enter => {
+					self.mode = Mode::Tail;
+					self.tail.follow();
+				}
+				KeyCode::Char(' ') => self.frozen = !self.frozen,
 				KeyCode::Char('a') => self.sim.ack_oldest(),
 				KeyCode::Char('A') => self.sim.ack_all(),
 				_ => {}
 			},
+			Mode::Tail => {
+				let visible_rows = self.layout.rows.saturating_sub(1) as usize;
+				self.tail.update(self.sim.backlog());
+				if self.tail.handle_key(key, self.sim.backlog(), visible_rows) == TailAction::Leave
+				{
+					self.mode = Mode::Rain;
+				}
+			}
 		}
 	}
 
 	fn resize(&mut self) -> Result<()> {
 		let (cols, rows) = terminal::size()?;
-		self.layout = Layout::new(cols, rows);
+		self.layout = Layout::new(cols, rows, self.window_lines);
 		self.frame = Frame::new(cols, rows);
+		self.window_refreshed = None;
 		self.renderer.invalidate();
 		self.sim.resize(self.layout.cols, self.layout.rain_rows);
 		Ok(())
@@ -282,6 +334,16 @@ impl App {
 		}
 		match self.mode {
 			Mode::Rain => self.compose_rain(),
+			Mode::Tail => {
+				self.tail.update(self.sim.backlog());
+				self.tail.draw(
+					&mut self.frame,
+					self.sim.backlog(),
+					self.sim.rules(),
+					&self.palette,
+					self.ascii_only,
+				);
+			}
 		}
 	}
 
@@ -289,30 +351,86 @@ impl App {
 		let ack_count = self.sim.ack_count();
 		let ack_text = format!("ack {ack_count}");
 		let right = (ack_count > 0).then_some((ack_text.as_str(), self.palette.ack));
-		rain_view::draw_help_bar(
-			&mut self.frame,
-			0,
-			rain_view::RAIN_HELP,
-			right,
-			&self.palette,
-		);
+		let help = if self.frozen {
+			format!("FROZEN  {}", rain_view::RAIN_HELP)
+		} else {
+			rain_view::RAIN_HELP.to_string()
+		};
+		rain_view::draw_help_bar(&mut self.frame, 0, &help, right, &self.palette);
 		rain_view::draw_rain(
 			&mut self.frame,
 			&self.sim,
 			self.layout.rain_top,
 			&self.palette,
 		);
+		// Undecoded glyphs change every frame, but stay put while frozen.
+		let mut glyph_rng = Rng::with_seed(self.sim.now().as_nanos() as u64);
 		rain_view::draw_caught(
 			&mut self.frame,
 			&self.sim,
 			self.layout.rain_top,
 			&self.palette,
-			&mut self.rng,
+			&mut glyph_rng,
 		);
+		self.draw_window();
+	}
+
+	/// Draws the backlog window, refreshing its content at most 5 times per
+	/// second so it stays readable under load.
+	fn draw_window(&mut self) {
+		if self.layout.window_rows == 0 {
+			return;
+		}
+		let rows = self.layout.window_rows as usize;
+		let stale = self
+			.window_refreshed
+			.is_none_or(|refreshed| refreshed.elapsed() >= WINDOW_REFRESH);
+		if stale && !self.frozen || self.window_entries.len() != rows.min(self.sim.backlog().len())
+		{
+			let backlog = self.sim.backlog();
+			let skip = backlog.len().saturating_sub(rows);
+			self.window_entries = backlog.iter().skip(skip).cloned().collect();
+			self.window_refreshed = Some(Instant::now());
+		}
+		let style = tail_view::RowStyle {
+			timestamp: self.palette.window_timestamp,
+			message: self.palette.window_message,
+			background: self.palette.window_bg,
+		};
+		let empty_rows = rows - self.window_entries.len();
+		for row in 0..rows as u16 {
+			let screen_row = self.layout.window_top + row;
+			match (row as usize)
+				.checked_sub(empty_rows)
+				.and_then(|index| self.window_entries.get(index))
+			{
+				Some(entry) => tail_view::draw_entry(
+					&mut self.frame,
+					screen_row,
+					entry,
+					self.sim.rules(),
+					&style,
+					&self.palette,
+					self.ascii_only,
+				),
+				None => self.frame.fill_row(
+					screen_row,
+					0,
+					crate::term::Cell {
+						ch: ' ',
+						fg: style.message,
+						bg: style.background,
+					},
+				),
+			}
+		}
 	}
 }
 
+fn is_ctrl_c(key: &KeyEvent) -> bool {
+	key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL)
+}
+
 fn is_quit_key(key: &KeyEvent) -> bool {
-	matches!(key.code, KeyCode::Char('q'))
-		|| (key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL))
+	key.code == KeyCode::Char('q') || is_ctrl_c(key)
 }

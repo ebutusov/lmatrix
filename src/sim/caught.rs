@@ -17,6 +17,9 @@ pub const DISSOLVE_TIME: Duration = Duration::from_millis(1500);
 pub const MAX_PENDING: usize = 50;
 /// Marker appended to lines that wait for acknowledgement.
 pub const ACK_MARKER: &str = " [a]";
+/// Maximum number of new lines waiting for the next tick (bounds memory
+/// while frozen or under a flood of matching lines).
+pub const MAX_INCOMING: usize = 256;
 
 /// How one character of a caught line is shown.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -167,6 +170,9 @@ impl Caught {
 	pub fn add(&mut self, spec: CaughtSpec) {
 		let seq = self.next_seq;
 		self.next_seq += 1;
+		if self.incoming.len() >= MAX_INCOMING {
+			self.incoming.remove(0);
+		}
 		self.incoming.push(CaughtLine {
 			seq,
 			rule: spec.rule,
