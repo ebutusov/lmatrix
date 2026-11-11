@@ -34,6 +34,8 @@ pub struct SimSettings {
 	pub replay: bool,
 	pub replay_brightness: f32,
 	pub replay_reserve: f32,
+	/// Replays pick from this many newest backlog lines.
+	pub replay_window: usize,
 	pub default_color: Rgb,
 	pub backlog: usize,
 	pub ascii_only: bool,
@@ -49,6 +51,7 @@ impl Default for SimSettings {
 			replay: true,
 			replay_brightness: 0.55,
 			replay_reserve: 0.15,
+			replay_window: 100,
 			default_color: Rgb(0x28, 0xff, 0x6e),
 			backlog: 10_000,
 			ascii_only: false,
@@ -251,7 +254,9 @@ impl Sim {
 				return;
 			}
 			self.replay_credit -= 1.0;
-			let index = self.rng.usize(..self.backlog.len());
+			// Pick from the newest `replay_window` lines only.
+			let window = self.settings.replay_window.clamp(1, self.backlog.len());
+			let index = self.backlog.len() - 1 - self.rng.usize(..window);
 			let text = match self.backlog.get(index) {
 				Some(entry) => entry.line.text.clone(),
 				None => return,
@@ -440,6 +445,39 @@ mod tests {
 		assert!(nonzero_offset);
 		assert_eq!(sim.caught_lines().len(), 0);
 		assert_eq!(sim.ack_count(), 0);
+	}
+
+	#[test]
+	fn replay_picks_from_newest_lines_only() {
+		let settings = SimSettings {
+			replay_window: 50,
+			backlog: 1000,
+			..SimSettings::default()
+		};
+		let mut sim = sim_with(settings, 80, 22);
+		let mut lines: Vec<LogLine> = (0..400)
+			.map(|index| line(&format!("old {index}")))
+			.collect();
+		lines.extend((0..50).map(|index| line(&format!("new {index}"))));
+		sim.preload(lines);
+		let mut replays = 0;
+		for _ in 0..100 {
+			sim.tick(FRAME);
+			for drop in sim.rain().drops() {
+				let text: String = drop.text().iter().collect();
+				assert!(text.starts_with("new "), "replayed an old line: {text}");
+				replays += 1;
+			}
+		}
+		assert!(replays > 0);
+	}
+
+	#[test]
+	fn replay_window_larger_than_backlog_uses_all_lines() {
+		let mut sim = sim_with(SimSettings::default(), 80, 22);
+		sim.preload(vec![line("only line")]);
+		run(&mut sim, Duration::from_secs(1));
+		assert!(sim.rain().active_drops() > 0);
 	}
 
 	#[test]

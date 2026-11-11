@@ -56,6 +56,11 @@ pub struct RainDrop {
 }
 
 impl RainDrop {
+	/// The full text of the drop's line.
+	pub fn text(&self) -> &[char] {
+		&self.text
+	}
+
 	fn char_for_row(&self, row: u16) -> char {
 		if self.text.is_empty() {
 			return ' ';

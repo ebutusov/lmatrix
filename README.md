@@ -89,6 +89,7 @@ the screen repeats from its start, so the text never limits the trail.
 | Brighter rain on a quiet host | `replay_brightness`, since most drops are replays there |
 | A smooth fade into black, as in the original design | `min_brightness = 0` |
 | More or fewer drops | `fill` |
+| Replays of recent or of older activity | `replay_window`: smaller replays only the latest lines, larger reaches further back |
 
 The color mode matters too. In 256-color mode the darkest shade of each hue
 is still fairly bright, so trails end with a step instead of a smooth fade.
@@ -128,6 +129,7 @@ startup errors that name the offending key or rule. Colors are written
 | `replay` | `true` | Replay old lines when live lines do not fill the rain |
 | `replay_brightness` | `0.55` | Brightness of replayed trails, 0.1..1.0 |
 | `replay_reserve` | `0.15` | Share of drop slots kept free for live lines, 0..1.0 |
+| `replay_window` | `100` | Replays pick a random line from the newest N backlog lines, 1..10000000. Set it to `tail.backlog` to replay from the whole backlog |
 | `min_brightness` | `0.3` | Lowest brightness of a visible trail cell, 0..1.0. Trails stay readable to their end and then vanish, instead of fading into black. `0` restores the plain fade |
 
 ### `[tail]`
