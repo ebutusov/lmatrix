@@ -2,6 +2,7 @@
 
 pub mod color;
 pub mod frame;
+pub mod input;
 
 use std::io::{self, Write};
 use std::sync::atomic::{AtomicBool, Ordering};

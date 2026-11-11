@@ -9,13 +9,14 @@ use std::sync::mpsc::{Receiver, RecvTimeoutError, TryRecvError};
 use std::time::{Duration, Instant};
 
 use anyhow::Result;
-use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
+use crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use crossterm::terminal;
 use fastrand::Rng;
 
 use crate::backlog::Entry;
 use crate::line::{LogLine, SourceMsg};
 use crate::sim::Sim;
+use crate::term::input::{Input, InputReader, terminal_hung_up};
 use crate::term::{ColorMode, Frame, Renderer, Rgb, TermColor};
 use tail_view::{TailAction, TailView};
 
@@ -168,8 +169,9 @@ pub fn run(
 		quit: false,
 	};
 	app.sim.resize(layout.cols, layout.rain_rows);
+	let input = InputReader::spawn()?;
 
-	let early_live = app.preload(&receiver, source_count, shutdown)?;
+	let early_live = app.preload(&receiver, &input, source_count, shutdown)?;
 	for line in early_live {
 		app.sim.push(line);
 	}
@@ -181,6 +183,9 @@ pub fn run(
 
 	while !app.quit && !shutdown.load(Ordering::SeqCst) {
 		let frame_start = Instant::now();
+		if terminal_hung_up() {
+			break;
+		}
 		if receiver_open {
 			receiver_open = app.drain(&receiver);
 		}
@@ -199,11 +204,12 @@ pub fn run(
 			if app.quit || shutdown.load(Ordering::SeqCst) {
 				break;
 			}
-			if !event::poll(remaining)? {
-				break;
+			match input.next(remaining) {
+				Input::Event(event) => app.handle_event(event)?,
+				Input::Timeout => break,
+				// The terminal can no longer be read: it is gone.
+				Input::Closed => app.quit = true,
 			}
-			let event = event::read()?;
-			app.handle_event(event)?;
 		}
 	}
 	stdout.flush()?;
@@ -217,6 +223,7 @@ impl App {
 	fn preload(
 		&mut self,
 		receiver: &Receiver<SourceMsg>,
+		input: &InputReader,
 		source_count: usize,
 		shutdown: &AtomicBool,
 	) -> Result<Vec<LogLine>> {
@@ -237,12 +244,18 @@ impl App {
 				Err(RecvTimeoutError::Disconnected) => break,
 			}
 			// Let the user quit while waiting.
-			while event::poll(Duration::ZERO)? {
-				if let Event::Key(key) = event::read()?
-					&& is_quit_key(&key)
-				{
-					self.quit = true;
-					return Ok(early_live);
+			loop {
+				match input.next(Duration::ZERO) {
+					Input::Event(Event::Key(key)) if is_quit_key(&key) => {
+						self.quit = true;
+						return Ok(early_live);
+					}
+					Input::Event(_) => {}
+					Input::Timeout => break,
+					Input::Closed => {
+						self.quit = true;
+						return Ok(early_live);
+					}
 				}
 			}
 		}

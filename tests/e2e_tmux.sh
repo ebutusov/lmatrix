@@ -114,5 +114,15 @@ tmux resize-window -t "$SESSION" -x 100 -y 30; sleep 0.8
 check "redraws after growing" '[[ "$(row 1)" == *"[enter] tail"* ]] && [[ "$(row 30)" =~ ^\ [0-9]{2}: ]]'
 tmux send-keys -t "$SESSION" q; sleep 0.5
 
+# Closing the terminal under lmatrix (dropped SSH session, killed pane)
+# must end the process instead of leaving it spinning.
+GONE="$SESSION-gone"
+tmux new-session -d -s "$GONE" -x 80 -y 24 "$BIN --demo"
+sleep 1.5
+GONE_PID="$(tmux display -p -t "$GONE" '#{pane_pid}')"
+tmux kill-session -t "$GONE"
+for _ in $(seq 1 20); do kill -0 "$GONE_PID" 2>/dev/null || break; sleep 0.1; done
+check "exits when its terminal is closed" '! kill -0 "$GONE_PID" 2>/dev/null || { kill -KILL "$GONE_PID"; false; }'
+
 if [ "$failures" -eq 0 ]; then echo "all e2e checks passed"; else echo "$failures e2e check(s) failed"; fi
 exit $(( failures > 0 ))
