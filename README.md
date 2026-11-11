@@ -301,3 +301,7 @@ It checks:
 - **Untrusted input:** escape sequences in log lines are stripped.
 - **Size:** the too-small message, and resizing.
 - **Lost terminal:** the process exits when its terminal is closed.
+
+## License
+
+MIT. See [LICENSE](LICENSE).
