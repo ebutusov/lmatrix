@@ -125,6 +125,7 @@ fn run(args: Args) -> Result<ExitCode> {
 
 	let options = UiOptions {
 		fps: config.display.fps,
+		min_brightness: config.rain.min_brightness,
 		color_mode: match config.display.color {
 			ColorChoice::Auto => term::detect_color_mode_from_env(),
 			ColorChoice::TrueColor => ColorMode::TrueColor,

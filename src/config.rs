@@ -40,6 +40,7 @@ pub struct RainConfig {
 	pub replay: bool,
 	pub replay_brightness: f32,
 	pub replay_reserve: f32,
+	pub min_brightness: f32,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -112,6 +113,7 @@ impl Default for Config {
 				replay: true,
 				replay_brightness: 0.55,
 				replay_reserve: 0.15,
+				min_brightness: 0.3,
 			},
 			tail: TailConfig {
 				backlog: 10_000,
@@ -224,6 +226,7 @@ struct RawRain {
 	replay: Option<bool>,
 	replay_brightness: Option<f32>,
 	replay_reserve: Option<f32>,
+	min_brightness: Option<f32>,
 }
 
 #[derive(Deserialize, Default)]
@@ -375,6 +378,12 @@ impl RawConfig {
 				replay_reserve: check_range(
 					"rain.replay_reserve",
 					raw.replay_reserve.unwrap_or(defaults.rain.replay_reserve),
+					0.0,
+					1.0,
+				)?,
+				min_brightness: check_range(
+					"rain.min_brightness",
+					raw.min_brightness.unwrap_or(defaults.rain.min_brightness),
 					0.0,
 					1.0,
 				)?,
@@ -635,6 +644,7 @@ color = "#3cc8ff"
 		assert!(error_of("[rain]\nfill = 1.5\n").contains("rain.fill"));
 		assert!(error_of("[rain]\nreplay_brightness = 0.05\n").contains("rain.replay_brightness"));
 		assert!(error_of("[rain]\nspeed = 0\n").contains("rain.speed"));
+		assert!(error_of("[rain]\nmin_brightness = 1.5\n").contains("rain.min_brightness"));
 		assert!(error_of("[tail]\nbacklog = 0\n").contains("tail.backlog"));
 		assert!(error_of("[display]\ncolor = \"8\"\n").contains("display.color"));
 	}

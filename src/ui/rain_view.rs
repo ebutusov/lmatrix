@@ -57,7 +57,7 @@ pub fn draw_rain(frame: &mut Frame, sim: &Sim, top: u16, palette: &Palette) {
 			let head = cell.level > HEAD_LEVEL;
 			let fg = palette.mode.shade(
 				cell.color,
-				palette.quantize_level(cell.level),
+				palette.rain_level(cell.level),
 				head,
 				palette.head_rgb,
 			);

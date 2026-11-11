@@ -40,6 +40,8 @@ const WINDOW_REFRESH: Duration = Duration::from_millis(200);
 #[derive(Debug, Clone)]
 pub struct UiOptions {
 	pub fps: u32,
+	/// Lowest brightness a visible rain cell is drawn with.
+	pub min_brightness: f32,
 	pub color_mode: ColorMode,
 	pub window_lines: u16,
 	pub ascii_only: bool,
@@ -49,6 +51,8 @@ pub struct UiOptions {
 #[derive(Debug, Clone)]
 pub struct Palette {
 	pub mode: ColorMode,
+	/// Lowest brightness a visible rain cell is drawn with.
+	pub min_level: f32,
 	pub head_rgb: Rgb,
 	pub help_bg: TermColor,
 	pub help_fg: TermColor,
@@ -67,6 +71,7 @@ impl Palette {
 	pub fn new(mode: ColorMode) -> Self {
 		Self {
 			mode,
+			min_level: 0.0,
 			head_rgb: Rgb(0xe8, 0xff, 0xf0),
 			help_bg: mode.solid(Rgb(0x0d, 0x24, 0x14)),
 			help_fg: mode.solid(Rgb(0x4f, 0xbf, 0x78)),
@@ -87,6 +92,13 @@ impl Palette {
 	pub fn quantize_level(&self, level: f32) -> f32 {
 		const STEPS: f32 = 32.0;
 		(level * STEPS).round() / STEPS
+	}
+
+	/// Brightness a visible rain cell is drawn with: never below the
+	/// minimum, so a trail stays readable to its end and then disappears
+	/// instead of fading into black.
+	pub fn rain_level(&self, level: f32) -> f32 {
+		self.quantize_level(level.max(self.min_level))
 	}
 }
 
@@ -155,7 +167,10 @@ pub fn run(
 	let layout = Layout::new(cols, rows, options.window_lines);
 	let mut app = App {
 		sim,
-		palette: Palette::new(options.color_mode),
+		palette: Palette {
+			min_level: options.min_brightness,
+			..Palette::new(options.color_mode)
+		},
 		renderer: Renderer::new(),
 		frame: Frame::new(cols, rows),
 		layout,
@@ -450,4 +465,21 @@ fn is_ctrl_c(key: &KeyEvent) -> bool {
 
 fn is_quit_key(key: &KeyEvent) -> bool {
 	key.code == KeyCode::Char('q') || is_ctrl_c(key)
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+
+	#[test]
+	fn rain_level_never_drops_below_minimum() {
+		let palette = Palette {
+			min_level: 0.3,
+			..Palette::new(ColorMode::TrueColor)
+		};
+		assert!((palette.rain_level(0.07) - 0.3125).abs() < 1e-6);
+		assert!((palette.rain_level(0.8) - 0.8125).abs() < 1e-6);
+		let plain = Palette::new(ColorMode::TrueColor);
+		assert!((plain.rain_level(0.07) - 0.0625).abs() < 1e-6);
+	}
 }

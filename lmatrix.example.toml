@@ -27,6 +27,8 @@ fade_half_life = "480ms"  # brightness half-life of a written cell (10ms..60s)
 replay = true             # replay old lines when live lines do not fill the rain
 replay_brightness = 0.55  # 0.1..1.0, brightness of replayed trails
 replay_reserve = 0.15     # 0..1.0, share of drop slots kept free for live lines
+min_brightness = 0.3      # 0..1.0, lowest brightness of a visible trail cell; trails
+                          # stay readable to their end, then vanish. 0 = fade to black
 
 [tail]
 backlog = 10000           # lines kept in memory (1..10000000)

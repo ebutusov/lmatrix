@@ -106,6 +106,7 @@ startup errors that name the offending key or rule. Colors are written
 | `replay` | `true` | Replay old lines when live lines do not fill the rain |
 | `replay_brightness` | `0.55` | Brightness of replayed trails, 0.1..1.0 |
 | `replay_reserve` | `0.15` | Share of drop slots kept free for live lines, 0..1.0 |
+| `min_brightness` | `0.3` | Lowest brightness of a visible trail cell, 0..1.0. Trails stay readable to their end and then vanish, instead of fading into black. `0` restores the plain fade |
 
 ### `[tail]`
 
