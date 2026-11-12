@@ -5,7 +5,6 @@
 //! input on a separate thread keeps the main loop in control, so it still
 //! sees shutdown signals and a hung-up terminal and can exit.
 
-use std::os::fd::AsRawFd;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
@@ -78,12 +77,23 @@ impl Drop for InputReader {
 
 /// True when the terminal on stdin or stdout has hung up (for example a
 /// dropped SSH session or a killed tmux pane).
+#[cfg(unix)]
 pub fn terminal_hung_up() -> bool {
+	use std::os::fd::AsRawFd;
+
 	[std::io::stdin().as_raw_fd(), std::io::stdout().as_raw_fd()]
 		.into_iter()
 		.any(fd_hung_up)
 }
 
+/// Always false on Windows: closing the console window ends the process,
+/// and child processes are cleaned up by their job object.
+#[cfg(windows)]
+pub fn terminal_hung_up() -> bool {
+	false
+}
+
+#[cfg(unix)]
 fn fd_hung_up(fd: i32) -> bool {
 	// SAFETY: isatty only inspects the descriptor.
 	if unsafe { libc::isatty(fd) } != 1 {

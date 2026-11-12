@@ -11,7 +11,7 @@ use std::time::Duration;
 use chrono::{DateTime, Local};
 use serde_json::Value;
 
-use super::{GroupChild, SourceContext, for_each_line, kill_group};
+use super::{GroupChild, SourceContext, for_each_line};
 
 /// Pause before journalctl is started again after it exited
 /// **(assumption)**: the spec does not say; 5 s matches the `command`
@@ -201,7 +201,7 @@ fn follow(
 	gate: &mut PreloadGate,
 	last_cursor: &mut Option<String>,
 ) -> bool {
-	let pgid = child.pgid();
+	let group = child.group();
 	let stderr_reader = child.take_stderr().and_then(|stderr| {
 		let stderr_context = context.clone();
 		thread::Builder::new()
@@ -212,7 +212,7 @@ fn follow(
 						|| stderr_context.report_error(&format!("journalctl: {line}"))
 				});
 				if !completed {
-					kill_group(pgid);
+					group.terminate();
 				}
 				completed
 			})

@@ -15,6 +15,16 @@ use lmatrix::source::{self, CHANNEL_CAPACITY, SourceContext};
 use lmatrix::term::{self, ColorMode, TerminalGuard};
 use lmatrix::ui::{self, UiOptions};
 
+/// Signals that end the app cleanly. Windows has no SIGHUP.
+#[cfg(unix)]
+const SHUTDOWN_SIGNALS: &[i32] = &[
+	signal_hook::consts::SIGTERM,
+	signal_hook::consts::SIGHUP,
+	signal_hook::consts::SIGINT,
+];
+#[cfg(windows)]
+const SHUTDOWN_SIGNALS: &[i32] = &[signal_hook::consts::SIGTERM, signal_hook::consts::SIGINT];
+
 /// Matrix-rain style log viewer: the rain is made of your logs.
 #[derive(Parser, Debug)]
 #[command(version, about)]
@@ -115,12 +125,8 @@ fn run(args: Args) -> Result<ExitCode> {
 	};
 
 	let shutdown = Arc::new(AtomicBool::new(false));
-	for signal in [
-		signal_hook::consts::SIGTERM,
-		signal_hook::consts::SIGHUP,
-		signal_hook::consts::SIGINT,
-	] {
-		signal_hook::flag::register(signal, Arc::clone(&shutdown))?;
+	for signal in SHUTDOWN_SIGNALS {
+		signal_hook::flag::register(*signal, Arc::clone(&shutdown))?;
 	}
 
 	let options = UiOptions {

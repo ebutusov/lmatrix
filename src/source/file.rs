@@ -5,9 +5,8 @@
 //! drive them step by step.
 
 use std::collections::{BTreeMap, HashSet};
-use std::fs::{self, File};
+use std::fs::File;
 use std::io::{self, Read, Seek, SeekFrom};
-use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -26,6 +25,69 @@ const RESCAN_INTERVAL: Duration = Duration::from_secs(5);
 /// **(assumption)**: gives log rotation (rename, then create) about a second
 /// to put the new file in place without reporting a disappearance.
 const MISSING_POLLS_BEFORE_GONE: u32 = 4;
+
+/// Identifies a file independently of its path, to notice rotation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct FileId {
+	device: u64,
+	index: u64,
+}
+
+/// Identity of an open file: device and inode.
+#[cfg(unix)]
+fn file_id(file: &File) -> io::Result<FileId> {
+	use std::os::unix::fs::MetadataExt;
+
+	let metadata = file.metadata()?;
+	Ok(FileId {
+		device: metadata.dev(),
+		index: metadata.ino(),
+	})
+}
+
+/// Identity of the file a path currently names.
+#[cfg(unix)]
+fn path_id(path: &Path) -> io::Result<FileId> {
+	use std::os::unix::fs::MetadataExt;
+
+	let metadata = std::fs::metadata(path)?;
+	Ok(FileId {
+		device: metadata.dev(),
+		index: metadata.ino(),
+	})
+}
+
+/// Identity of an open file: volume serial number and file index. Creation
+/// times would not do: NTFS gives a file created under a just-renamed name
+/// the old file's creation time ("tunneling"), which is exactly rotation.
+#[cfg(windows)]
+fn file_id(file: &File) -> io::Result<FileId> {
+	use std::os::windows::io::AsRawHandle;
+	use windows_sys::Win32::Storage::FileSystem::{
+		BY_HANDLE_FILE_INFORMATION, GetFileInformationByHandle,
+	};
+
+	// SAFETY: an all-zero BY_HANDLE_FILE_INFORMATION is a valid value.
+	let mut info: BY_HANDLE_FILE_INFORMATION = unsafe { std::mem::zeroed() };
+	// SAFETY: the handle is open for the lifetime of `file` and `info` is a
+	// valid out pointer.
+	if unsafe { GetFileInformationByHandle(file.as_raw_handle() as _, &mut info) } == 0 {
+		return Err(io::Error::last_os_error());
+	}
+	Ok(FileId {
+		device: u64::from(info.dwVolumeSerialNumber),
+		index: (u64::from(info.nFileIndexHigh) << 32) | u64::from(info.nFileIndexLow),
+	})
+}
+
+/// Identity of the file a path currently names. Windows can only tell
+/// through an open handle; std opens files with shared read, write and
+/// delete access, so this does not get in the way of the writer or of
+/// rotation.
+#[cfg(windows)]
+fn path_id(path: &Path) -> io::Result<FileId> {
+	file_id(&File::open(path)?)
+}
 
 /// Size of the chunks read backwards when looking for the last lines.
 const TAIL_CHUNK_BYTES: u64 = 64 * 1024;
@@ -109,7 +171,7 @@ pub enum PollStatus {
 pub struct FollowedFile {
 	path: PathBuf,
 	file: File,
-	inode: u64,
+	identity: FileId,
 	offset: u64,
 	partial: Vec<u8>,
 	missing_polls: u32,
@@ -119,11 +181,11 @@ impl FollowedFile {
 	/// Opens `path` to be followed from its start.
 	pub fn open_from_start(path: &Path) -> io::Result<Self> {
 		let file = File::open(path)?;
-		let inode = file.metadata()?.ino();
+		let identity = file_id(&file)?;
 		Ok(Self {
 			path: path.to_path_buf(),
 			file,
-			inode,
+			identity,
 			offset: 0,
 			partial: Vec::new(),
 			missing_polls: 0,
@@ -145,12 +207,12 @@ impl FollowedFile {
 	}
 
 	/// Reads new data, appending completed lines to `lines`. Handles
-	/// rotation (the path now names another inode) and truncation (the file
+	/// rotation (the path now names another file) and truncation (the file
 	/// is shorter than what was read) by continuing at the start of the
 	/// current file.
 	pub fn poll(&mut self, lines: &mut Vec<String>) -> PollStatus {
-		let path_metadata = match fs::metadata(&self.path) {
-			Ok(metadata) => metadata,
+		let path_identity = match path_id(&self.path) {
+			Ok(identity) => identity,
 			Err(_) => {
 				// Gone or unreadable for now: keep draining the open file.
 				self.read_new_data(lines);
@@ -164,16 +226,13 @@ impl FollowedFile {
 		};
 		self.missing_polls = 0;
 
-		if path_metadata.ino() != self.inode {
+		if path_identity != self.identity {
 			// Rotated: finish the old file, then switch to the new one.
 			self.read_new_data(lines);
 			self.flush_partial(lines);
 			match File::open(&self.path) {
 				Ok(file) => {
-					self.inode = file
-						.metadata()
-						.map(|metadata| metadata.ino())
-						.unwrap_or(path_metadata.ino());
+					self.identity = file_id(&file).unwrap_or(path_identity);
 					self.file = file;
 					self.offset = 0;
 				}
@@ -387,6 +446,7 @@ pub fn run(pattern: String, context: SourceContext, preload: usize) {
 #[cfg(test)]
 mod tests {
 	use super::*;
+	use std::fs;
 	use std::io::Write;
 
 	/// A scratch directory under the system temp dir, removed on drop.

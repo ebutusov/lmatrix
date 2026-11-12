@@ -7,12 +7,12 @@ use std::time::Duration;
 
 use chrono::Local;
 
-use super::{GroupChild, SourceContext, for_each_line, kill_group};
+use super::{GroupChild, SourceContext, for_each_line};
 
 /// Settings of one `command` source.
 #[derive(Debug, Clone)]
 pub struct CommandSettings {
-	/// Shell command, run with `sh -c`.
+	/// Shell command, run with `sh -c` (PowerShell on Windows).
 	pub run: String,
 	/// Start the command again when it exits.
 	pub restart: bool,
@@ -56,13 +56,31 @@ pub fn run(settings: CommandSettings, context: SourceContext) {
 	}
 }
 
+/// The command line run by the system shell: `sh -c` on Unix, PowerShell
+/// on Windows.
+#[cfg(unix)]
+fn shell_command(run: &str) -> Command {
+	let mut command = Command::new("sh");
+	command.arg("-c").arg(run);
+	command
+}
+
+#[cfg(windows)]
+fn shell_command(run: &str) -> Command {
+	let mut command = Command::new("powershell");
+	command
+		.args(["-NoLogo", "-NoProfile", "-NonInteractive", "-Command"])
+		.arg(run);
+	command
+}
+
 /// Runs the command once and forwards its output until it exits.
 fn run_once(run: &str, context: &SourceContext) -> RunOutcome {
-	let mut child = match GroupChild::spawn(Command::new("sh").arg("-c").arg(run)) {
+	let mut child = match GroupChild::spawn(&mut shell_command(run)) {
 		Ok(child) => child,
 		Err(error) => return RunOutcome::Failed(format!("cannot start: {error}")),
 	};
-	let pgid = child.pgid();
+	let group = child.group();
 
 	let stderr_reader = child.take_stderr().and_then(|stderr| {
 		let stderr_context = context.clone();
@@ -73,7 +91,7 @@ fn run_once(run: &str, context: &SourceContext) -> RunOutcome {
 					stderr_context.send_live(Local::now(), &line)
 				});
 				if !completed {
-					kill_group(pgid);
+					group.terminate();
 				}
 				completed
 			})

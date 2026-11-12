@@ -181,20 +181,33 @@ pub fn locate(explicit: Option<&Path>) -> Result<Option<PathBuf>> {
 		}
 		return Ok(Some(path.to_path_buf()));
 	}
+	Ok(default_config_paths()
+		.into_iter()
+		.find(|candidate| candidate.is_file()))
+}
+
+/// Config files looked for when none is given, in order.
+#[cfg(unix)]
+fn default_config_paths() -> Vec<PathBuf> {
 	let xdg_dir = std::env::var_os("XDG_CONFIG_HOME")
 		.filter(|value| !value.is_empty())
 		.map(PathBuf::from)
 		.or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".config")));
-	let candidates = xdg_dir
+	xdg_dir
 		.map(|dir| dir.join("lmatrix").join("config.toml"))
 		.into_iter()
-		.chain(std::iter::once(PathBuf::from("/etc/lmatrix/config.toml")));
-	for candidate in candidates {
-		if candidate.is_file() {
-			return Ok(Some(candidate));
-		}
-	}
-	Ok(None)
+		.chain(std::iter::once(PathBuf::from("/etc/lmatrix/config.toml")))
+		.collect()
+}
+
+/// Config files looked for when none is given: `%APPDATA%\lmatrix\config.toml`.
+#[cfg(windows)]
+fn default_config_paths() -> Vec<PathBuf> {
+	std::env::var_os("APPDATA")
+		.filter(|value| !value.is_empty())
+		.map(|dir| PathBuf::from(dir).join("lmatrix").join("config.toml"))
+		.into_iter()
+		.collect()
 }
 
 // ---------------------------------------------------------------------------
