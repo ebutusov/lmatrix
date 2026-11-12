@@ -306,6 +306,42 @@ It checks:
 - **Size:** the too-small message, and resizing.
 - **Lost terminal:** the process exits when its terminal is closed.
 
+### Code map
+
+lmatrix is a single crate: a library (used by the tests) and a binary. Each
+source runs on its own thread and sends lines over a channel. The main thread
+holds all state. Each frame it feeds the lines it received to the simulation,
+advances the simulation, draws the frame for the current mode and writes only
+the cells that changed.
+
+| Path | Role |
+|---|---|
+| `src/main.rs` | Command-line flags, config loading, `--check`, starting the sources and signal handlers, entering the terminal and running the UI |
+| `src/lib.rs` | Library root; declares the modules |
+| `src/config.rs` | Config file lookup, serde structs, defaults, validation, conversion to simulation settings |
+| `src/line.rs` | `LogLine`, `SourceMsg` (preload / preload done / live), sanitizing untrusted text, truncation |
+| `src/rules.rs` | Highlight rules and `RuleSet`: one regex-set pass per line, first match wins |
+| `src/backlog.rs` | Bounded ring buffer of received lines with their matched rule |
+| `src/source/mod.rs` | Starts a thread per source; `SourceContext` for sending lines and errors; child process groups and their cleanup |
+| `src/source/journald.rs` | `journald` source: runs `journalctl -f -o json` and formats entries |
+| `src/source/file.rs` | `file` source: follows every file matching a glob, handles rotation and truncation |
+| `src/source/command.rs` | `command` source: runs a shell command, reads stdout and stderr, restarts it |
+| `src/source/demo.rs` | Fake line generator and demo rules for `--demo` |
+| `src/sim/mod.rs` | `Sim`: push, tick, resize, ack; ties the backlog, rules, rain and caught lines together; replay and `strip_pattern`. Never touches the terminal |
+| `src/sim/rain.rs` | Falling drops, fading cells, fill factor |
+| `src/sim/caught.rs` | Caught lines: decode, hold, dissolve, eviction, pending queue |
+| `src/ui/mod.rs` | Main loop, layout, modes, key handling, palette, backlog window |
+| `src/ui/rain_view.rs` | Draws rain mode: help bar, rain, caught lines, backlog window |
+| `src/ui/tail_view.rs` | Tail mode: scrollable backlog, following, regex filter |
+| `src/term/mod.rs` | Terminal guard (setup and restore, panic hook), color mode detection. Knows nothing about logs |
+| `src/term/frame.rs` | Cell buffer and diff renderer that writes to any `io::Write` |
+| `src/term/color.rs` | RGB colors and quantizing to truecolor, 256 or 16 colors |
+| `src/term/input.rs` | Input reader thread and detection of a closed terminal |
+| `examples/panic_restore.rs` | Panics in full-screen mode to check terminal restore (used by the e2e script) |
+| `tests/e2e_tmux.sh` | End-to-end checks in a detached tmux session |
+| `lmatrix.example.toml` | Commented default config, embedded in the binary for `--print-default-config` |
+| `specs.md` | Design specification |
+
 ## License
 
 MIT. See [LICENSE](LICENSE).
