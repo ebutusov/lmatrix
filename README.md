@@ -1,5 +1,7 @@
 # lmatrix
 
+<img width="955" height="501" alt="lmatrix_img" src="https://github.com/user-attachments/assets/628cd409-e9df-4777-982a-fd257cefe179" />
+
 [![CI](https://github.com/ebutusov/lmatrix/actions/workflows/ci.yml/badge.svg)](https://github.com/ebutusov/lmatrix/actions/workflows/ci.yml)
 
 A Matrix-rain style log viewer for Linux terminals, and for Windows Terminal
