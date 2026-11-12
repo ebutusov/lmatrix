@@ -27,7 +27,7 @@ fade_half_life = "480ms"  # brightness half-life of a written cell (10ms..60s)
 replay = true             # replay old lines when live lines do not fill the rain
 replay_brightness = 0.55  # 0.1..1.0, brightness of replayed trails
 replay_reserve = 0.15     # 0..1.0, share of drop slots kept free for live lines
-replay_window = 100       # replays pick from the newest N backlog lines (1..10000000)
+replay_window = "auto"    # replays pick from the newest N backlog lines (1..10000000); "auto" scales with width
 min_brightness = 0.3      # 0..1.0, lowest brightness of a visible trail cell; trails
                           # stay readable to their end, then vanish. 0 = fade to black
 strip_pattern = '^[^:]*:\s*'  # regex; its first match is removed from the text shown
@@ -45,6 +45,8 @@ preload = 200             # lines read at startup per journald/file source (0..1
 type = "journald"         # runs journalctl -f -o json
 units = []                # e.g. ["ssh.service", "nginx.service"]; empty = everything
 # label = "sys"
+# host = "admin@web1"     # read this host's journal over ssh (required on Windows)
+# ssh_args = ["-C"]       # extra ssh arguments, e.g. ["-C", "-p", "2222"]
 
 # [[source]]
 # type = "file"
@@ -52,7 +54,7 @@ units = []                # e.g. ["ssh.service", "nginx.service"]; empty = every
 
 # [[source]]
 # type = "command"
-# run = "docker logs -f web"      # run through sh -c; stdout and stderr are read
+# run = "docker logs -f web"      # run through sh -c (PowerShell on Windows)
 # restart = true                  # start again when it exits
 # restart_delay = "5s"            # at least 100ms
 

@@ -10,7 +10,8 @@ This document is the complete implementation brief. Where it gives a number, tha
 
 ### Goals
 
-- Single binary, `lmatrix`, for a single Linux host.
+- Single binary, `lmatrix`, for a single Linux host, or for one or more remote hosts whose journals are read over ssh (see 6.1).
+- Also builds for Windows, to run in Windows Terminal against remote journals (see 6.6).
 - Runs in terminal emulators, typically over SSH: Windows Terminal, PuTTY, and inside tmux must all work.
 - Sources, rules and visual parameters come from a TOML config file.
 - Looks like classic Matrix rain at all times, on a busy host and on an idle one.
@@ -18,11 +19,11 @@ This document is the complete implementation brief. Where it gives a number, tha
 
 ### Non-goals
 
-- Multiple hosts, remote collection, or any network listener.
+- Any network listener, or remote collection other than running `journalctl` over ssh.
 - CPU, memory, network or other system metrics. The screen shows logs only.
 - Mouse support.
 - Linux virtual console (`TERM=linux`) specific tricks such as palette redefinition.
-- Native Windows or macOS builds.
+- macOS builds.
 - Persisting state (backlog, acknowledgements) across restarts.
 - Reading `/dev/kmsg` directly. Kernel messages arrive through journald.
 
@@ -102,7 +103,7 @@ A drop is one log line falling down one column.
 - A new drop starts at the top row of the rain area in a **random column that has no active drop**.
 - Its speed is `speed × uniform(1 − speed_jitter, 1 + speed_jitter)` rows per second. Defaults: `speed = 16`, `speed_jitter = 0.35`.
 - Each time the drop advances one row, it writes the next character of its text into that cell.
-  - A space in the text is written as a random glyph from `0123456789abcdef:/[]<>=+-*#%&$@`, chosen once when the cell is written.
+  - A space in the text is written as a space, so words stay readable. It overwrites the cell like any other character.
   - If the text is shorter than the rain area, it wraps around and continues from its first character.
   - If the text is longer, the drop simply ends at the bottom; the rest is not shown.
 - The drop ends when it leaves the bottom of the rain area. Its column is then free again.
@@ -125,7 +126,8 @@ When live lines do not keep the rain filled, old lines are replayed so the scree
 
 - Active only when `replay = true` (default) and the backlog is not empty.
 - While the number of active drops is below `floor(max_drops × (1 − replay_reserve))` (`replay_reserve` default 0.15), spawn replay drops at an average rate of 14 per second. The reserve keeps slots free for live lines on a quiet host.
-- A replay drop takes a random backlog entry and starts at a **random character position** in its text, wrapping around, so columns do not all begin with the same prefix.
+- A replay drop takes a random entry from the newest `replay_window` backlog lines (all of them if the backlog is shorter). With `replay_window = "auto"` (default) the window is `max(100, 4 × floor(max_drops × (1 − replay_reserve)))`, recomputed on every pick, so it follows resizes. With a small fixed window, a wide screen with many replay slots would show the same few lines in many columns at once.
+- It starts at a **random character position** in its text, wrapping around, so columns do not all begin with the same prefix.
 - Replay drops are always in the default color, even if the original line matched a rule, and never trigger rules again. Color in the rain therefore always means a live event.
 - Replay drops are dimmer: the head is drawn normally, and every cell behind the head is clamped to `replay_brightness` (default 0.55) as soon as the head moves on.
 - Replays are not added to the backlog and never appear in tail mode or the backlog window.
@@ -184,17 +186,20 @@ Each source runs in its own thread and sends lines over a bounded channel (capac
 - Line text: `<SYSLOG_IDENTIFIER>[<_PID>]: <MESSAGE>`; omit the `[pid]` part when there is no PID, and fall back to `_COMM` when there is no identifier. `MESSAGE` can be a JSON array of byte values when it is not valid UTF-8; decode it lossily.
 - Timestamp: `__REALTIME_TIMESTAMP` (microseconds since the epoch).
 - Do not link against libsystemd.
+- Only `MESSAGE`, `SYSLOG_IDENTIFIER`, `_PID` and `_COMM` are requested (`--output-fields`, systemd 236+); journalctl adds the cursor and timestamps by itself. About half the output size.
+- When journalctl exits, it is started again after 5 s with `--after-cursor=<last cursor>`, so no entry is lost or repeated.
+- **Remote (`host`).** With `host = "<ssh destination>"`, journalctl runs on that host through `ssh -T -o BatchMode=yes -o ServerAliveInterval=15 -o ServerAliveCountMax=2 <ssh_args> -- <host> <command>`. Each journalctl argument is single-quoted for the remote shell. Authentication must work without a prompt (keys or an agent). The backlog is read by a first run without `-f` that ends after `-n <preload>` entries, then a second run follows with `--after-cursor`. The local heuristic of 6.4 is not used, because clock skew and network latency break it. ssh's stderr is reported as `lmatrix: journalctl on <host>: …` lines.
 
 ### 6.2 `file`
 
 - `path` is a glob. All matching files are followed. The glob is re-evaluated every 5 seconds to pick up new files.
 - At startup, the last `preload` lines of each file are read as preloaded lines; then the file is followed from its end.
-- Poll for new data every 250 ms. Detect rotation (inode change) and truncation (size shrinks) and reopen from the start of the new file.
+- Poll for new data every 250 ms. Detect rotation (a different file identity: device and inode on Unix, volume serial and file index on Windows) and truncation (size shrinks) and reopen from the start of the new file.
 - Timestamp: time of reception. Do not try to parse timestamps out of the text.
 
 ### 6.3 `command`
 
-- Runs `run` through `sh -c` and reads lines from its stdout and stderr.
+- Runs `run` through `sh -c` (`powershell -NoProfile -NonInteractive -Command` on Windows) and reads lines from its stdout and stderr.
 - If the command exits and `restart = true` (default), it is started again after `restart_delay` (default 5 s).
 - No preload.
 
@@ -208,6 +213,13 @@ Each source runs in its own thread and sends lines over a bounded channel (capac
 - A source may have an optional `label`; when set, each of its lines is prefixed with `label: `.
 - Source errors (child process fails to start, `journalctl` reports a permission problem, a file disappears) are reported as ordinary lines with the text `lmatrix: <description>`, so they show up in the backlog and can be matched by rules. A failing source never terminates the app.
 - All child processes are terminated when the app exits.
+
+### 6.6 Windows
+
+- No local journal: a journald source must set `host`. Otherwise, including when no config file exists, startup fails with an error that says so (`--demo` excepted).
+- Config file: `%APPDATA%\lmatrix\config.toml`.
+- Each child runs in a job object with kill-on-close, and without a console of its own. Children are stopped on exit, and also when lmatrix is killed or its window is closed.
+- SIGHUP and terminal hang-up detection do not exist there; closing the console window ends the process.
 
 ---
 
@@ -298,6 +310,7 @@ fade_half_life = "480ms"
 replay = true
 replay_brightness = 0.55  # 0.1..1.0
 replay_reserve = 0.15     # share of slots kept free for live lines
+replay_window = "auto"    # newest N backlog lines replays pick from, or "auto"
 
 [tail]
 backlog = 10000           # lines kept in memory
@@ -375,6 +388,7 @@ lmatrix/
     │   ├── journald.rs
     │   ├── file.rs
     │   ├── command.rs
+    │   ├── process.rs   # child processes: process groups / job objects
     │   └── demo.rs      # fake generator for --demo
     ├── sim/
     │   ├── mod.rs       # Sim: push, tick, resize, ack

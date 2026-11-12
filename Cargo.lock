@@ -411,6 +411,7 @@ dependencies = [
  "signal-hook 0.4.6",
  "toml",
  "unicode-width",
+ "windows-sys",
 ]
 
 [[package]]

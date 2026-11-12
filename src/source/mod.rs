@@ -4,10 +4,9 @@ pub mod command;
 pub mod demo;
 pub mod file;
 pub mod journald;
+pub mod process;
 
 use std::io::{self, BufRead};
-use std::process::{Child, ChildStderr, ChildStdout, Command, ExitStatus, Stdio};
-use std::sync::Mutex;
 use std::sync::mpsc::SyncSender;
 use std::thread;
 
@@ -16,6 +15,8 @@ use chrono::{DateTime, Local};
 use crate::config::SourceConfig;
 use crate::line::{LogLine, SourceId, SourceMsg, sanitize};
 
+pub use process::{ChildGroup, GroupChild, terminate_children};
+
 /// Starts the thread for one configured source.
 ///
 /// A failure to start the thread is reported as an error line; the source
@@ -23,11 +24,12 @@ use crate::line::{LogLine, SourceId, SourceMsg, sanitize};
 pub fn spawn(config: &SourceConfig, context: SourceContext, preload: usize) {
 	let fallback = context.clone();
 	let started = match config {
-		SourceConfig::Journald { units, .. } => {
+		SourceConfig::Journald { units, remote, .. } => {
 			let units = units.clone();
+			let remote = remote.clone();
 			thread::Builder::new()
 				.name(format!("source-journald-{}", context.id))
-				.spawn(move || journald::run(units, context, preload))
+				.spawn(move || journald::run(units, remote, context, preload))
 		}
 		SourceConfig::File { path, .. } => {
 			let pattern = path.clone();
@@ -104,116 +106,6 @@ impl SourceContext {
 		self.sender
 			.send(SourceMsg::Live(LogLine::new(Local::now(), self.id, text)))
 			.is_ok()
-	}
-}
-
-static CHILD_GROUPS: Mutex<Vec<i32>> = Mutex::new(Vec::new());
-
-/// Remembers a child process group so it is terminated on exit.
-pub fn register_child_group(pgid: i32) {
-	if let Ok(mut groups) = CHILD_GROUPS.lock() {
-		groups.push(pgid);
-	}
-}
-
-/// Forgets a child process group that has exited.
-pub fn unregister_child_group(pgid: i32) {
-	if let Ok(mut groups) = CHILD_GROUPS.lock() {
-		groups.retain(|group| *group != pgid);
-	}
-}
-
-/// Sends SIGTERM to every registered child process group.
-pub fn terminate_children() {
-	let groups = match CHILD_GROUPS.lock() {
-		Ok(mut groups) => std::mem::take(&mut *groups),
-		Err(_) => return,
-	};
-	for pgid in groups {
-		kill_group(pgid);
-	}
-}
-
-/// Sends SIGTERM to one process group.
-pub fn kill_group(pgid: i32) {
-	if pgid > 0 {
-		// SAFETY: kill() has no memory-safety preconditions; a negative pid
-		// addresses the process group we created for the child.
-		unsafe {
-			libc::kill(-pgid, libc::SIGTERM);
-		}
-	}
-}
-
-/// A child process running in its own process group.
-///
-/// The group is registered with [`register_child_group`] while the child
-/// runs, so [`terminate_children`] also reaches its descendants. Dropping a
-/// child that has not been waited for terminates its group and reaps it.
-pub struct GroupChild {
-	child: Child,
-	pgid: i32,
-	reaped: bool,
-}
-
-impl GroupChild {
-	/// Spawns `command` with stdin closed and stdout and stderr piped, as the
-	/// leader of a new process group.
-	pub fn spawn(command: &mut Command) -> io::Result<Self> {
-		use std::os::unix::process::CommandExt;
-
-		let child = command
-			.stdin(Stdio::null())
-			.stdout(Stdio::piped())
-			.stderr(Stdio::piped())
-			.process_group(0)
-			.spawn()?;
-		let pgid = child.id() as i32;
-		register_child_group(pgid);
-		Ok(Self {
-			child,
-			pgid,
-			reaped: false,
-		})
-	}
-
-	/// Process group id (equal to the child's pid).
-	pub fn pgid(&self) -> i32 {
-		self.pgid
-	}
-
-	/// Takes the read end of the child's stdout.
-	pub fn take_stdout(&mut self) -> Option<ChildStdout> {
-		self.child.stdout.take()
-	}
-
-	/// Takes the read end of the child's stderr.
-	pub fn take_stderr(&mut self) -> Option<ChildStderr> {
-		self.child.stderr.take()
-	}
-
-	/// Sends SIGTERM to the whole process group.
-	pub fn terminate(&self) {
-		if !self.reaped {
-			kill_group(self.pgid);
-		}
-	}
-
-	/// Waits for the child to exit and forgets its process group.
-	pub fn wait(&mut self) -> io::Result<ExitStatus> {
-		let status = self.child.wait();
-		self.reaped = true;
-		unregister_child_group(self.pgid);
-		status
-	}
-}
-
-impl Drop for GroupChild {
-	fn drop(&mut self) {
-		if !self.reaped {
-			self.terminate();
-			let _ = self.wait();
-		}
 	}
 }
 

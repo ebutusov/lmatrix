@@ -7,7 +7,7 @@ use anyhow::{Context, Result, anyhow, bail};
 use serde::Deserialize;
 
 use crate::rules::Rule;
-use crate::sim::SimSettings;
+use crate::sim::{ReplayWindow, SimSettings};
 use crate::term::Rgb;
 
 /// The commented default configuration printed by `--print-default-config`.
@@ -44,7 +44,7 @@ pub struct RainConfig {
 	pub replay: bool,
 	pub replay_brightness: f32,
 	pub replay_reserve: f32,
-	pub replay_window: usize,
+	pub replay_window: ReplayWindow,
 	pub min_brightness: f32,
 	/// Regex whose first match is removed from rain text; `None` = off.
 	pub strip_pattern: Option<String>,
@@ -61,6 +61,8 @@ pub struct TailConfig {
 pub enum SourceConfig {
 	Journald {
 		units: Vec<String>,
+		/// Read the journal of this host over ssh instead of the local one.
+		remote: Option<RemoteHost>,
 		label: Option<String>,
 	},
 	File {
@@ -87,9 +89,19 @@ impl SourceConfig {
 	pub fn default_journald() -> Self {
 		SourceConfig::Journald {
 			units: Vec::new(),
+			remote: None,
 			label: None,
 		}
 	}
+}
+
+/// A remote host whose journal is read over ssh.
+#[derive(Debug, Clone, PartialEq)]
+pub struct RemoteHost {
+	/// ssh destination, such as `admin@web1` or a `Host` alias.
+	pub host: String,
+	/// Extra ssh arguments, such as `["-C", "-p", "2222"]`.
+	pub ssh_args: Vec<String>,
 }
 
 /// A validated configuration.
@@ -120,7 +132,7 @@ impl Default for Config {
 				replay: true,
 				replay_brightness: 0.55,
 				replay_reserve: 0.15,
-				replay_window: 100,
+				replay_window: ReplayWindow::Auto,
 				min_brightness: 0.3,
 				strip_pattern: Some(DEFAULT_STRIP_PATTERN.to_string()),
 			},
@@ -135,6 +147,28 @@ impl Default for Config {
 }
 
 impl Config {
+	/// Fails when a source reads the local journal on a system that has
+	/// none (Windows).
+	pub fn check_platform(&self) -> Result<()> {
+		self.check_local_journal(cfg!(unix))
+	}
+
+	fn check_local_journal(&self, available: bool) -> Result<()> {
+		if available {
+			return Ok(());
+		}
+		for (index, source) in self.sources.iter().enumerate() {
+			if let SourceConfig::Journald { remote: None, .. } = source {
+				bail!(
+					"source[{index}]: this system has no local journal; set host to read a \
+					 remote one over ssh (without any [[source]] section, a local journald \
+					 source is used)"
+				);
+			}
+		}
+		Ok(())
+	}
+
 	/// Parses and validates configuration text.
 	pub fn parse(text: &str) -> Result<Config> {
 		let raw: RawConfig =
@@ -181,20 +215,33 @@ pub fn locate(explicit: Option<&Path>) -> Result<Option<PathBuf>> {
 		}
 		return Ok(Some(path.to_path_buf()));
 	}
+	Ok(default_config_paths()
+		.into_iter()
+		.find(|candidate| candidate.is_file()))
+}
+
+/// Config files looked for when none is given, in order.
+#[cfg(unix)]
+fn default_config_paths() -> Vec<PathBuf> {
 	let xdg_dir = std::env::var_os("XDG_CONFIG_HOME")
 		.filter(|value| !value.is_empty())
 		.map(PathBuf::from)
 		.or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".config")));
-	let candidates = xdg_dir
+	xdg_dir
 		.map(|dir| dir.join("lmatrix").join("config.toml"))
 		.into_iter()
-		.chain(std::iter::once(PathBuf::from("/etc/lmatrix/config.toml")));
-	for candidate in candidates {
-		if candidate.is_file() {
-			return Ok(Some(candidate));
-		}
-	}
-	Ok(None)
+		.chain(std::iter::once(PathBuf::from("/etc/lmatrix/config.toml")))
+		.collect()
+}
+
+/// Config files looked for when none is given: `%APPDATA%\lmatrix\config.toml`.
+#[cfg(windows)]
+fn default_config_paths() -> Vec<PathBuf> {
+	std::env::var_os("APPDATA")
+		.filter(|value| !value.is_empty())
+		.map(|dir| PathBuf::from(dir).join("lmatrix").join("config.toml"))
+		.into_iter()
+		.collect()
 }
 
 // ---------------------------------------------------------------------------
@@ -241,7 +288,7 @@ struct RawRain {
 	replay: Option<bool>,
 	replay_brightness: Option<f32>,
 	replay_reserve: Option<f32>,
-	replay_window: Option<usize>,
+	replay_window: Option<StringOrInt>,
 	min_brightness: Option<f32>,
 	strip_pattern: Option<String>,
 }
@@ -259,6 +306,8 @@ enum RawSource {
 	Journald {
 		#[serde(default)]
 		units: Vec<String>,
+		host: Option<String>,
+		ssh_args: Option<Vec<String>>,
 		label: Option<String>,
 	},
 	File {
@@ -280,6 +329,31 @@ struct RawRule {
 	pattern: String,
 	color: String,
 	hold: Option<String>,
+}
+
+/// Validates the `host` and `ssh_args` keys of a journald source.
+fn check_remote(
+	key: &str,
+	host: Option<String>,
+	ssh_args: Option<Vec<String>>,
+) -> Result<Option<RemoteHost>> {
+	let Some(host) = host else {
+		if ssh_args.is_some() {
+			bail!("{key}.ssh_args: only allowed together with host");
+		}
+		return Ok(None);
+	};
+	if host.trim().is_empty() || host.chars().any(char::is_whitespace) {
+		bail!("{key}.host: must be a single ssh destination such as 'admin@web1'");
+	}
+	if host.starts_with('-') {
+		bail!("{key}.host: must not start with '-'");
+	}
+	let ssh_args = ssh_args.unwrap_or_default();
+	if ssh_args.iter().any(|arg| arg.is_empty()) {
+		bail!("{key}.ssh_args: arguments must not be empty");
+	}
+	Ok(Some(RemoteHost { host, ssh_args }))
 }
 
 fn check_range<T: PartialOrd + std::fmt::Display + Copy>(
@@ -407,12 +481,18 @@ impl RawConfig {
 					0.0,
 					1.0,
 				)?,
-				replay_window: check_range(
-					"rain.replay_window",
-					raw.replay_window.unwrap_or(defaults.rain.replay_window),
-					1,
-					10_000_000,
-				)?,
+				replay_window: match raw.replay_window {
+					None => defaults.rain.replay_window,
+					Some(StringOrInt::Text(text)) if text == "auto" => ReplayWindow::Auto,
+					Some(StringOrInt::Text(other)) => {
+						bail!("rain.replay_window: must be \"auto\" or a number, got '{other}'")
+					}
+					Some(StringOrInt::Number(lines)) => {
+						ReplayWindow::Lines(
+							check_range("rain.replay_window", lines, 1, 10_000_000)? as usize,
+						)
+					}
+				},
 				min_brightness: check_range(
 					"rain.min_brightness",
 					raw.min_brightness.unwrap_or(defaults.rain.min_brightness),
@@ -445,12 +525,18 @@ impl RawConfig {
 				for (index, raw) in raw_sources.into_iter().enumerate() {
 					let key = format!("source[{index}]");
 					sources.push(match raw {
-						RawSource::Journald { units, label } => {
+						RawSource::Journald {
+							units,
+							host,
+							ssh_args,
+							label,
+						} => {
 							if units.iter().any(|unit| unit.trim().is_empty()) {
 								bail!("{key}.units: unit names must not be empty");
 							}
 							SourceConfig::Journald {
 								units,
+								remote: check_remote(&key, host, ssh_args)?,
 								label: check_label(&format!("{key}.label"), label)?,
 							}
 						}
@@ -538,6 +624,15 @@ mod tests {
 		assert_eq!(config.tail, defaults.tail);
 		assert_eq!(config.sources, vec![SourceConfig::default_journald()]);
 		assert!(config.rules.is_empty());
+	}
+
+	#[test]
+	fn replay_window_accepts_auto_and_numbers() {
+		let auto = Config::parse("[rain]\nreplay_window = \"auto\"\n").unwrap();
+		assert_eq!(auto.rain.replay_window, ReplayWindow::Auto);
+		let fixed = Config::parse("[rain]\nreplay_window = 250\n").unwrap();
+		assert_eq!(fixed.rain.replay_window, ReplayWindow::Lines(250));
+		assert_eq!(fixed.sim_settings().replay_window, ReplayWindow::Lines(250));
 	}
 
 	#[test]
@@ -646,6 +741,60 @@ color = "#3cc8ff"
 	}
 
 	#[test]
+	fn remote_journald_source() {
+		let config = Config::parse(
+			r#"
+[[source]]
+type = "journald"
+host = "admin@web1"
+ssh_args = ["-C", "-p", "2222"]
+units = ["nginx.service"]
+"#,
+		)
+		.unwrap();
+		assert_eq!(
+			config.sources,
+			vec![SourceConfig::Journald {
+				units: vec!["nginx.service".into()],
+				remote: Some(RemoteHost {
+					host: "admin@web1".into(),
+					ssh_args: vec!["-C".into(), "-p".into(), "2222".into()],
+				}),
+				label: None,
+			}]
+		);
+	}
+
+	#[test]
+	fn remote_journald_errors() {
+		let source = |keys: &str| error_of(&format!("[[source]]\ntype = \"journald\"\n{keys}\n"));
+		assert!(source(r#"host = """#).contains("source[0].host"));
+		assert!(source(r#"host = "a b""#).contains("source[0].host"));
+		assert!(source(r#"host = "-oProxyCommand=x""#).contains("must not start with '-'"));
+		assert!(
+			source(
+				r#"host = "h"
+ssh_args = [""]"#
+			)
+			.contains("source[0].ssh_args")
+		);
+		assert!(source(r#"ssh_args = ["-C"]"#).contains("only allowed together with host"));
+	}
+
+	#[test]
+	fn local_journal_needs_platform_support() {
+		let local = Config::parse("").unwrap();
+		assert!(local.check_local_journal(true).is_ok());
+		let error = format!("{:#}", local.check_local_journal(false).unwrap_err());
+		assert!(error.contains("source[0]") && error.contains("set host"));
+
+		let remote = Config::parse("[[source]]\ntype = \"journald\"\nhost = \"h\"\n").unwrap();
+		assert!(remote.check_local_journal(false).is_ok());
+		let none = Config::parse("source = []").unwrap();
+		assert!(none.check_local_journal(false).is_ok());
+	}
+
+	#[test]
 	fn explicit_empty_source_list() {
 		let config = Config::parse("source = []\n").unwrap();
 		assert!(config.sources.is_empty());
@@ -679,6 +828,7 @@ color = "#3cc8ff"
 		assert!(error_of("[rain]\nspeed = 0\n").contains("rain.speed"));
 		assert!(error_of("[rain]\nmin_brightness = 1.5\n").contains("rain.min_brightness"));
 		assert!(error_of("[rain]\nreplay_window = 0\n").contains("rain.replay_window"));
+		assert!(error_of("[rain]\nreplay_window = \"big\"\n").contains("rain.replay_window"));
 		assert!(error_of("[tail]\nbacklog = 0\n").contains("tail.backlog"));
 		assert!(error_of("[display]\ncolor = \"8\"\n").contains("display.color"));
 	}

@@ -4,7 +4,7 @@ use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 use std::sync::mpsc;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use clap::Parser;
 use fastrand::Rng;
 
@@ -14,6 +14,16 @@ use lmatrix::sim::Sim;
 use lmatrix::source::{self, CHANNEL_CAPACITY, SourceContext};
 use lmatrix::term::{self, ColorMode, TerminalGuard};
 use lmatrix::ui::{self, UiOptions};
+
+/// Signals that end the app cleanly. Windows has no SIGHUP.
+#[cfg(unix)]
+const SHUTDOWN_SIGNALS: &[i32] = &[
+	signal_hook::consts::SIGTERM,
+	signal_hook::consts::SIGHUP,
+	signal_hook::consts::SIGINT,
+];
+#[cfg(windows)]
+const SHUTDOWN_SIGNALS: &[i32] = &[signal_hook::consts::SIGTERM, signal_hook::consts::SIGINT];
 
 /// Matrix-rain style log viewer: the rain is made of your logs.
 #[derive(Parser, Debug)]
@@ -60,6 +70,16 @@ fn run(args: Args) -> Result<ExitCode> {
 		Some(path) => Config::load_file(path),
 		None => Ok(Config::default()),
 	};
+	// --demo ignores the configured sources.
+	let loaded = loaded.and_then(|config| {
+		if !args.demo {
+			config.check_platform().with_context(|| match &path {
+				Some(path) => format!("invalid config {}", path.display()),
+				None => "no config file found, using the defaults".to_string(),
+			})?;
+		}
+		Ok(config)
+	});
 
 	if args.check {
 		return Ok(match loaded {
@@ -115,12 +135,8 @@ fn run(args: Args) -> Result<ExitCode> {
 	};
 
 	let shutdown = Arc::new(AtomicBool::new(false));
-	for signal in [
-		signal_hook::consts::SIGTERM,
-		signal_hook::consts::SIGHUP,
-		signal_hook::consts::SIGINT,
-	] {
-		signal_hook::flag::register(signal, Arc::clone(&shutdown))?;
+	for signal in SHUTDOWN_SIGNALS {
+		signal_hook::flag::register(*signal, Arc::clone(&shutdown))?;
 	}
 
 	let options = UiOptions {

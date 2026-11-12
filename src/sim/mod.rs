@@ -26,6 +26,21 @@ use rain::{DropSpec, Rain};
 /// Average number of replay drops started per second.
 pub const REPLAY_RATE: f32 = 14.0;
 
+/// Replays in auto mode pick from this many newest lines per replay slot.
+pub const AUTO_REPLAY_LINES_PER_SLOT: usize = 4;
+/// Smallest replay window in auto mode.
+pub const AUTO_REPLAY_MIN_WINDOW: usize = 100;
+
+/// How many of the newest backlog lines replays pick from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReplayWindow {
+	/// Scales with the number of replay slots, so wide screens do not show
+	/// the same lines in many columns at once.
+	Auto,
+	/// A fixed number of lines.
+	Lines(usize),
+}
+
 /// Tunables of the simulation.
 #[derive(Debug, Clone)]
 pub struct SimSettings {
@@ -37,7 +52,7 @@ pub struct SimSettings {
 	pub replay_brightness: f32,
 	pub replay_reserve: f32,
 	/// Replays pick from this many newest backlog lines.
-	pub replay_window: usize,
+	pub replay_window: ReplayWindow,
 	/// The first match is removed from the text shown in the rain.
 	pub strip_pattern: Option<Regex>,
 	pub default_color: Rgb,
@@ -55,7 +70,7 @@ impl Default for SimSettings {
 			replay: true,
 			replay_brightness: 0.55,
 			replay_reserve: 0.15,
-			replay_window: 100,
+			replay_window: ReplayWindow::Auto,
 			strip_pattern: None,
 			default_color: Rgb(0x28, 0xff, 0x6e),
 			backlog: 10_000,
@@ -140,6 +155,17 @@ impl Sim {
 		(self.max_drops() as f32 * (1.0 - self.settings.replay_reserve)).floor() as usize
 	}
 
+	/// Number of newest backlog lines replays pick from (before clamping to
+	/// the backlog length).
+	pub fn replay_window(&self) -> usize {
+		match self.settings.replay_window {
+			ReplayWindow::Auto => {
+				(self.replay_limit() * AUTO_REPLAY_LINES_PER_SLOT).max(AUTO_REPLAY_MIN_WINDOW)
+			}
+			ReplayWindow::Lines(lines) => lines,
+		}
+	}
+
 	/// Sets the rain area size: `cols` wide, `rain_rows` tall.
 	pub fn resize(&mut self, cols: u16, rain_rows: u16) {
 		self.rain.resize(cols, rain_rows);
@@ -222,7 +248,6 @@ impl Sim {
 			dt,
 			self.settings.fade_half_life,
 			self.settings.replay_brightness,
-			&mut self.rng,
 		);
 		self.caught.tick(
 			self.now,
@@ -262,7 +287,7 @@ impl Sim {
 			}
 			self.replay_credit -= 1.0;
 			// Pick from the newest `replay_window` lines only.
-			let window = self.settings.replay_window.clamp(1, self.backlog.len());
+			let window = self.replay_window().clamp(1, self.backlog.len());
 			let index = self.backlog.len() - 1 - self.rng.usize(..window);
 			let text = match self.backlog.get(index) {
 				Some(entry) => {
@@ -544,7 +569,7 @@ mod tests {
 	#[test]
 	fn replay_picks_from_newest_lines_only() {
 		let settings = SimSettings {
-			replay_window: 50,
+			replay_window: ReplayWindow::Lines(50),
 			backlog: 1000,
 			..SimSettings::default()
 		};
@@ -564,6 +589,28 @@ mod tests {
 			}
 		}
 		assert!(replays > 0);
+	}
+
+	#[test]
+	fn auto_replay_window_scales_with_width() {
+		let narrow = sim_with(SimSettings::default(), 80, 22);
+		assert_eq!(narrow.replay_window(), AUTO_REPLAY_MIN_WINDOW);
+		let mut wide = sim_with(SimSettings::default(), 300, 22);
+		// fill 0.35 → 105 drops, reserve 0.15 → 89 replay slots.
+		assert_eq!(wide.replay_limit(), 89);
+		assert_eq!(wide.replay_window(), 89 * AUTO_REPLAY_LINES_PER_SLOT);
+		wide.resize(80, 22);
+		assert_eq!(wide.replay_window(), AUTO_REPLAY_MIN_WINDOW);
+	}
+
+	#[test]
+	fn fixed_replay_window_ignores_width() {
+		let settings = SimSettings {
+			replay_window: ReplayWindow::Lines(30),
+			..SimSettings::default()
+		};
+		let sim = sim_with(settings, 300, 22);
+		assert_eq!(sim.replay_window(), 30);
 	}
 
 	#[test]
