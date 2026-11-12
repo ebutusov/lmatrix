@@ -134,6 +134,18 @@ mod tests {
 	use std::sync::mpsc;
 	use std::time::Instant;
 
+	/// Prints `a` and `b` on stdout and `oops` on stderr in the platform's shell.
+	#[cfg(unix)]
+	const TWO_LINES_AND_STDERR: &str = "printf 'a\\nb\\n'; echo oops >&2";
+	#[cfg(windows)]
+	const TWO_LINES_AND_STDERR: &str = "'a'; 'b'; [Console]::Error.WriteLine('oops')";
+
+	/// How `std::process::ExitStatus` displays an exit code.
+	#[cfg(unix)]
+	const EXIT_STATUS: &str = "exit status";
+	#[cfg(windows)]
+	const EXIT_STATUS: &str = "exit code";
+
 	fn collect_until_exit(receiver: &mpsc::Receiver<SourceMsg>) -> (bool, Vec<String>) {
 		let deadline = Instant::now() + Duration::from_secs(10);
 		let mut preload_done = false;
@@ -167,7 +179,7 @@ mod tests {
 			sender,
 		};
 		let settings = CommandSettings {
-			run: "printf 'a\\nb\\n'; echo oops >&2".into(),
+			run: TWO_LINES_AND_STDERR.into(),
 			restart: false,
 			restart_delay: Duration::from_secs(5),
 		};
@@ -184,7 +196,10 @@ mod tests {
 		assert!(a_index < b_index);
 		let last = lines.last().unwrap();
 		assert!(last.starts_with("lmatrix: command '"), "{last}");
-		assert!(last.contains("exited with exit status: 0"), "{last}");
+		assert!(
+			last.contains(&format!("exited with {EXIT_STATUS}: 0")),
+			"{last}"
+		);
 	}
 
 	#[test]
@@ -207,7 +222,9 @@ mod tests {
 		drop(receiver);
 		assert_eq!(
 			lines.last().unwrap(),
-			"lmatrix: command 'exit 3' exited with exit status: 3, restarting in 1s 500ms"
+			&format!(
+				"lmatrix: command 'exit 3' exited with {EXIT_STATUS}: 3, restarting in 1s 500ms"
+			)
 		);
 	}
 }
