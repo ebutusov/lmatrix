@@ -1,9 +1,10 @@
-//! `journald` source: follows `journalctl -f -o json`.
+//! `journald` source: follows `journalctl -f -o json`, locally or on a
+//! remote host through ssh.
 //!
 //! journalctl is run as a child process; libsystemd is not linked.
 
 use std::io::BufReader;
-use std::process::Command;
+use std::process::{Command, ExitStatus};
 use std::sync::mpsc::{self, RecvTimeoutError};
 use std::thread;
 use std::time::Duration;
@@ -12,6 +13,7 @@ use chrono::{DateTime, Local};
 use serde_json::Value;
 
 use super::{GroupChild, SourceContext, for_each_line};
+use crate::config::RemoteHost;
 
 /// Pause before journalctl is started again after it exited
 /// **(assumption)**: the spec does not say; 5 s matches the `command`
@@ -142,50 +144,161 @@ impl PreloadGate {
 	}
 }
 
+/// Fields requested from journalctl; it always adds `__CURSOR` and
+/// `__REALTIME_TIMESTAMP`. Leaving out the rest roughly halves the output,
+/// which matters when it comes over ssh. Needs systemd 236 or later.
+const OUTPUT_FIELDS: &str = "--output-fields=MESSAGE,SYSLOG_IDENTIFIER,_PID,_COMM";
+
+/// Options always given to ssh. Batch mode, because stdin is closed and the
+/// screen is in raw mode, so ssh could not ask for a password. Keepalives,
+/// so a dead connection is noticed and the source reconnects.
+const SSH_OPTIONS: [&str; 7] = [
+	"-T",
+	"-o",
+	"BatchMode=yes",
+	"-o",
+	"ServerAliveInterval=15",
+	"-o",
+	"ServerAliveCountMax=2",
+];
+
+/// Where a journalctl run starts reading.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Start<'a> {
+	/// The last `n` entries (`-n n`; `0` means only new ones).
+	Last(usize),
+	/// Right after the entry with this cursor.
+	AfterCursor(&'a str),
+}
+
+/// Arguments for one journalctl run. With `follow`, journalctl keeps running
+/// and prints new entries; without, it prints the requested entries and
+/// exits.
+pub fn journalctl_args(units: &[String], start: Start, follow: bool) -> Vec<String> {
+	let mut args = Vec::new();
+	if follow {
+		args.push("-f".to_string());
+	} else {
+		args.push("--no-pager".to_string());
+	}
+	args.extend([
+		"-o".to_string(),
+		"json".to_string(),
+		OUTPUT_FIELDS.to_string(),
+	]);
+	match start {
+		Start::Last(count) => args.extend(["-n".to_string(), count.to_string()]),
+		Start::AfterCursor(cursor) => args.push(format!("--after-cursor={cursor}")),
+	}
+	for unit in units {
+		args.extend(["-u".to_string(), unit.clone()]);
+	}
+	args
+}
+
+/// Quotes `text` as one word for a POSIX shell. ssh joins its remote
+/// arguments with spaces and hands them to the remote user's shell, and
+/// cursors contain `;`.
+pub fn shell_quote(text: &str) -> String {
+	format!("'{}'", text.replace('\'', "'\\''"))
+}
+
+/// Program and arguments that run journalctl with `args`, locally or on
+/// `remote` through ssh.
+pub fn command_line(remote: Option<&RemoteHost>, args: &[String]) -> (String, Vec<String>) {
+	match remote {
+		None => ("journalctl".to_string(), args.to_vec()),
+		Some(remote) => {
+			let remote_command = std::iter::once("journalctl".to_string())
+				.chain(args.iter().map(|arg| shell_quote(arg)))
+				.collect::<Vec<_>>()
+				.join(" ");
+			let mut ssh_args: Vec<String> = SSH_OPTIONS
+				.iter()
+				.map(|option| option.to_string())
+				.collect();
+			ssh_args.extend(remote.ssh_args.iter().cloned());
+			ssh_args.extend(["--".to_string(), remote.host.clone(), remote_command]);
+			("ssh".to_string(), ssh_args)
+		}
+	}
+}
+
 /// Body of the source thread.
-pub fn run(units: Vec<String>, context: SourceContext, preload: usize) {
+pub fn run(units: Vec<String>, remote: Option<RemoteHost>, context: SourceContext, preload: usize) {
+	let name = match &remote {
+		Some(remote) => format!("journalctl on {}", remote.host),
+		None => "journalctl".to_string(),
+	};
 	let mut gate = PreloadGate::new(Local::now(), preload);
-	if preload == 0 && !gate.finish(&context) {
+	let mut last_cursor: Option<String> = None;
+	if remote.is_some() {
+		// Over the network neither the time of the entries (clock skew)
+		// nor gaps in the output (latency) tell where the backlog ends, so
+		// it is read by a separate run that ends after it.
+		if preload > 0 {
+			let args = journalctl_args(&units, Start::Last(preload), false);
+			match run_journalctl(
+				&name,
+				remote.as_ref(),
+				&args,
+				&context,
+				&mut Phase::Preload,
+				&mut last_cursor,
+			) {
+				RunOutcome::ReceiverGone => return,
+				RunOutcome::Exited(status) if !status.success() => {
+					if !context.report_error(&format!(
+						"{name} exited with {status} while reading the backlog"
+					)) {
+						return;
+					}
+				}
+				RunOutcome::Exited(_) => {}
+				RunOutcome::Failed(error) => {
+					context.report_error(&format!("cannot start {name}: {error}"));
+					gate.finish(&context);
+					return;
+				}
+			}
+		}
+		if !gate.finish(&context) {
+			return;
+		}
+	} else if preload == 0 && !gate.finish(&context) {
 		return;
 	}
-	let mut last_cursor: Option<String> = None;
-	loop {
-		let mut command = Command::new("journalctl");
-		command.args(["-f", "-o", "json"]);
-		match &last_cursor {
-			// After a restart, continue where the previous run stopped.
-			Some(cursor) => {
-				command.arg(format!("--after-cursor={cursor}"));
-			}
-			None => {
-				command.arg("-n").arg(preload.to_string());
-			}
-		}
-		for unit in &units {
-			command.arg("-u").arg(unit);
-		}
 
-		let mut child = match GroupChild::spawn(&mut command) {
-			Ok(child) => child,
-			Err(error) => {
-				context.report_error(&format!("cannot start journalctl: {error}"));
+	loop {
+		let start = match &last_cursor {
+			// After a restart, continue where the previous run stopped.
+			Some(cursor) => Start::AfterCursor(cursor),
+			None if remote.is_some() => Start::Last(0),
+			None => Start::Last(preload),
+		};
+		let args = journalctl_args(&units, start, true);
+		let mut phase = Phase::Follow(&mut gate);
+		let status = match run_journalctl(
+			&name,
+			remote.as_ref(),
+			&args,
+			&context,
+			&mut phase,
+			&mut last_cursor,
+		) {
+			RunOutcome::ReceiverGone => return,
+			RunOutcome::Exited(status) => status.to_string(),
+			RunOutcome::Failed(error) => {
+				// The program is missing or cannot run: retrying will not help.
+				context.report_error(&format!("cannot start {name}: {error}"));
 				gate.finish(&context);
 				return;
 			}
 		};
-		if !follow(&mut child, &context, &mut gate, &mut last_cursor) {
-			child.terminate();
-			let _ = child.wait();
-			return;
-		}
-		let status = match child.wait() {
-			Ok(status) => status.to_string(),
-			Err(error) => error.to_string(),
-		};
 		let delay = humantime::format_duration(RESTART_DELAY);
 		if !gate.finish(&context)
 			|| !context.report_error(&format!(
-				"journalctl exited with {status}, restarting in {delay}"
+				"{name} exited with {status}, restarting in {delay}"
 			)) {
 			return;
 		}
@@ -193,14 +306,60 @@ pub fn run(units: Vec<String>, context: SourceContext, preload: usize) {
 	}
 }
 
+/// How the entries of one run are sent.
+enum Phase<'a> {
+	/// Everything is preload; the run ends after the backlog.
+	Preload,
+	/// Entries go through the preload gate (live once it is done).
+	Follow(&'a mut PreloadGate),
+}
+
+/// How one journalctl run ended.
+enum RunOutcome {
+	Exited(ExitStatus),
+	/// journalctl (or ssh) could not be started or waited for.
+	Failed(String),
+	/// The main loop is gone; the thread must stop.
+	ReceiverGone,
+}
+
+/// Starts journalctl once and forwards its output until it exits.
+fn run_journalctl(
+	name: &str,
+	remote: Option<&RemoteHost>,
+	args: &[String],
+	context: &SourceContext,
+	phase: &mut Phase,
+	last_cursor: &mut Option<String>,
+) -> RunOutcome {
+	let (program, program_args) = command_line(remote, args);
+	let mut command = Command::new(program);
+	command.args(program_args);
+	let mut child = match GroupChild::spawn(&mut command) {
+		Ok(child) => child,
+		Err(error) => return RunOutcome::Failed(error.to_string()),
+	};
+	if !follow(name, &mut child, context, phase, last_cursor) {
+		child.terminate();
+		let _ = child.wait();
+		return RunOutcome::ReceiverGone;
+	}
+	match child.wait() {
+		Ok(status) => RunOutcome::Exited(status),
+		Err(error) => RunOutcome::Failed(format!("cannot wait: {error}")),
+	}
+}
+
 /// Forwards the output of one journalctl run until it closes stdout.
 /// Returns `false` when the main loop is gone.
 fn follow(
+	name: &str,
 	child: &mut GroupChild,
 	context: &SourceContext,
-	gate: &mut PreloadGate,
+	phase: &mut Phase,
 	last_cursor: &mut Option<String>,
 ) -> bool {
+	let stderr_prefix = name.to_string();
 	let group = child.group();
 	let stderr_reader = child.take_stderr().and_then(|stderr| {
 		let stderr_context = context.clone();
@@ -209,7 +368,7 @@ fn follow(
 			.spawn(move || {
 				let completed = for_each_line(BufReader::new(stderr), |line| {
 					line.trim().is_empty()
-						|| stderr_context.report_error(&format!("journalctl: {line}"))
+						|| stderr_context.report_error(&format!("{stderr_prefix}: {line}"))
 				});
 				if !completed {
 					group.terminate();
@@ -235,7 +394,11 @@ fn follow(
 
 	let mut receiver_alive = true;
 	loop {
-		let received = match gate.timeout() {
+		let timeout = match phase {
+			Phase::Preload => None,
+			Phase::Follow(gate) => gate.timeout(),
+		};
+		let received = match timeout {
 			Some(timeout) => entry_receiver.recv_timeout(timeout),
 			None => entry_receiver
 				.recv()
@@ -246,13 +409,19 @@ fn follow(
 				if entry.cursor.is_some() {
 					last_cursor.clone_from(&entry.cursor);
 				}
-				if !gate.send(context, &entry) {
+				let sent = match phase {
+					Phase::Preload => context.send_preload(entry.ts, &entry.text),
+					Phase::Follow(gate) => gate.send(context, &entry),
+				};
+				if !sent {
 					receiver_alive = false;
 					break;
 				}
 			}
 			Err(RecvTimeoutError::Timeout) => {
-				if !gate.finish(context) {
+				if let Phase::Follow(gate) = phase
+					&& !gate.finish(context)
+				{
 					receiver_alive = false;
 					break;
 				}
@@ -398,6 +567,73 @@ mod tests {
 		assert_eq!(kinds, vec!["preload", "preload", "done", "live"]);
 	}
 
+	fn strings(items: &[&str]) -> Vec<String> {
+		items.iter().map(|item| item.to_string()).collect()
+	}
+
+	#[test]
+	fn args_for_follow_with_backlog() {
+		assert_eq!(
+			journalctl_args(&strings(&["ssh.service"]), Start::Last(200), true),
+			strings(&[
+				"-f",
+				"-o",
+				"json",
+				OUTPUT_FIELDS,
+				"-n",
+				"200",
+				"-u",
+				"ssh.service"
+			])
+		);
+	}
+
+	#[test]
+	fn args_for_backlog_only() {
+		assert_eq!(
+			journalctl_args(&[], Start::Last(50), false),
+			strings(&["--no-pager", "-o", "json", OUTPUT_FIELDS, "-n", "50"])
+		);
+	}
+
+	#[test]
+	fn args_after_cursor() {
+		assert_eq!(
+			journalctl_args(&[], Start::AfterCursor("s=a;i=1"), true),
+			strings(&["-f", "-o", "json", OUTPUT_FIELDS, "--after-cursor=s=a;i=1"])
+		);
+	}
+
+	#[test]
+	fn shell_quoting() {
+		assert_eq!(shell_quote("plain"), "'plain'");
+		assert_eq!(shell_quote(""), "''");
+		assert_eq!(shell_quote("a b;c"), "'a b;c'");
+		assert_eq!(shell_quote("it's"), r"'it'\''s'");
+	}
+
+	#[test]
+	fn local_command_line() {
+		let args = strings(&["-f", "-n", "5"]);
+		assert_eq!(command_line(None, &args), ("journalctl".to_string(), args));
+	}
+
+	#[test]
+	fn remote_command_line() {
+		let remote = RemoteHost {
+			host: "admin@web1".to_string(),
+			ssh_args: strings(&["-C", "-p", "2222"]),
+		};
+		let args = strings(&["-f", "--after-cursor=s=a;i=1", "-u", "it's.service"]);
+		let (program, argv) = command_line(Some(&remote), &args);
+		assert_eq!(program, "ssh");
+		let mut expected = strings(&SSH_OPTIONS);
+		expected.extend(strings(&["-C", "-p", "2222", "--", "admin@web1"]));
+		expected
+			.push(r"journalctl '-f' '--after-cursor=s=a;i=1' '-u' 'it'\''s.service'".to_string());
+		assert_eq!(argv, expected);
+	}
+
 	/// Needs a readable journal: `cargo test -- --ignored`.
 	#[test]
 	#[ignore]
@@ -409,7 +645,7 @@ mod tests {
 			ascii_only: false,
 			sender,
 		};
-		thread::spawn(move || run(Vec::new(), context, 3));
+		thread::spawn(move || run(Vec::new(), None, context, 3));
 		let started = std::time::Instant::now();
 		let mut preload_lines = Vec::new();
 		loop {

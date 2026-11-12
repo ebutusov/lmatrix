@@ -72,6 +72,46 @@ check "'a' clears the ack count" '[[ "$(row 1)" != *"ack 1"* ]]'
 tmux send-keys -t "$SESSION" q; sleep 0.7
 check "child command terminated on quit" '! pgrep -f "sleep 3600" >/dev/null'
 
+# A remote journald source, with a fake ssh that runs the remote command
+# locally through sh (so the quoting is checked too). Needs a readable
+# journal and logger; skipped otherwise.
+if command -v logger >/dev/null && journalctl -q -n 0 >/dev/null 2>&1; then
+	mkdir -p "$WORK/bin"
+	cat > "$WORK/bin/ssh" <<SHIM
+#!/bin/sh
+printf '%s\n' "\$*" >> "$WORK/ssh-calls"
+while [ \$# -gt 0 ] && [ "\$1" != "--" ]; do shift; done
+shift 2
+exec sh -c "\$1"
+SHIM
+	chmod +x "$WORK/bin/ssh"
+	MARK="e2e-remote-$$"
+	cat > "$WORK/remote.toml" <<TOML
+[[source]]
+type = "journald"
+host = "e2e-host"
+
+[[rule]]
+name = "marker"
+pattern = "$MARK-(old|new)"
+color = "#ff463c"
+hold = "ack"
+TOML
+	logger -t lmatrix-e2e "$MARK-old"; sleep 1
+	start "PATH=$WORK/bin:\$PATH $BIN --config $WORK/remote.toml" 3
+	check "remote: backlog line is not decoded" '[[ "$(row 1)" != *"ack 1"* ]]'
+	logger -t lmatrix-e2e "$MARK-new"; sleep 2
+	check "remote: live line is decoded" '[[ "$(row 1)" == *"ack 1" ]]'
+	check "remote: backlog read first, then followed" '[[ "$(sed -n 1p "$WORK/ssh-calls")" == *"-- e2e-host journalctl '"'--no-pager'"'"* && "$(sed -n 2p "$WORK/ssh-calls")" == *"-- e2e-host journalctl '"'-f'"'"* ]]'
+	tmux send-keys -t "$SESSION" Enter; sleep 0.3
+	tmux send-keys -t "$SESSION" / "$MARK" Enter; sleep 0.5
+	check "remote: both lines in tail mode" 'screen | grep -q "lmatrix-e2e.*$MARK-old" && screen | grep -q "lmatrix-e2e.*$MARK-new"'
+	tmux send-keys -t "$SESSION" q; sleep 0.7
+	check "remote: journalctl stopped on quit" '! pgrep -f "journalctl .-f. .-o. .json." >/dev/null'
+else
+	echo "skip  remote journald (no readable journal or no logger)"
+fi
+
 # SIGTERM restores the terminal.
 start "$BIN --demo" 1.5
 pkill -TERM -x lmatrix; sleep 0.7

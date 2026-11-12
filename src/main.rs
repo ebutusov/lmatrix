@@ -4,7 +4,7 @@ use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 use std::sync::mpsc;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use clap::Parser;
 use fastrand::Rng;
 
@@ -70,6 +70,16 @@ fn run(args: Args) -> Result<ExitCode> {
 		Some(path) => Config::load_file(path),
 		None => Ok(Config::default()),
 	};
+	// --demo ignores the configured sources.
+	let loaded = loaded.and_then(|config| {
+		if !args.demo {
+			config.check_platform().with_context(|| match &path {
+				Some(path) => format!("invalid config {}", path.display()),
+				None => "no config file found, using the defaults".to_string(),
+			})?;
+		}
+		Ok(config)
+	});
 
 	if args.check {
 		return Ok(match loaded {

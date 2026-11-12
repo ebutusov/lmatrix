@@ -61,6 +61,8 @@ pub struct TailConfig {
 pub enum SourceConfig {
 	Journald {
 		units: Vec<String>,
+		/// Read the journal of this host over ssh instead of the local one.
+		remote: Option<RemoteHost>,
 		label: Option<String>,
 	},
 	File {
@@ -87,9 +89,19 @@ impl SourceConfig {
 	pub fn default_journald() -> Self {
 		SourceConfig::Journald {
 			units: Vec::new(),
+			remote: None,
 			label: None,
 		}
 	}
+}
+
+/// A remote host whose journal is read over ssh.
+#[derive(Debug, Clone, PartialEq)]
+pub struct RemoteHost {
+	/// ssh destination, such as `admin@web1` or a `Host` alias.
+	pub host: String,
+	/// Extra ssh arguments, such as `["-C", "-p", "2222"]`.
+	pub ssh_args: Vec<String>,
 }
 
 /// A validated configuration.
@@ -135,6 +147,28 @@ impl Default for Config {
 }
 
 impl Config {
+	/// Fails when a source reads the local journal on a system that has
+	/// none (Windows).
+	pub fn check_platform(&self) -> Result<()> {
+		self.check_local_journal(cfg!(unix))
+	}
+
+	fn check_local_journal(&self, available: bool) -> Result<()> {
+		if available {
+			return Ok(());
+		}
+		for (index, source) in self.sources.iter().enumerate() {
+			if let SourceConfig::Journald { remote: None, .. } = source {
+				bail!(
+					"source[{index}]: this system has no local journal; set host to read a \
+					 remote one over ssh (without any [[source]] section, a local journald \
+					 source is used)"
+				);
+			}
+		}
+		Ok(())
+	}
+
 	/// Parses and validates configuration text.
 	pub fn parse(text: &str) -> Result<Config> {
 		let raw: RawConfig =
@@ -272,6 +306,8 @@ enum RawSource {
 	Journald {
 		#[serde(default)]
 		units: Vec<String>,
+		host: Option<String>,
+		ssh_args: Option<Vec<String>>,
 		label: Option<String>,
 	},
 	File {
@@ -293,6 +329,31 @@ struct RawRule {
 	pattern: String,
 	color: String,
 	hold: Option<String>,
+}
+
+/// Validates the `host` and `ssh_args` keys of a journald source.
+fn check_remote(
+	key: &str,
+	host: Option<String>,
+	ssh_args: Option<Vec<String>>,
+) -> Result<Option<RemoteHost>> {
+	let Some(host) = host else {
+		if ssh_args.is_some() {
+			bail!("{key}.ssh_args: only allowed together with host");
+		}
+		return Ok(None);
+	};
+	if host.trim().is_empty() || host.chars().any(char::is_whitespace) {
+		bail!("{key}.host: must be a single ssh destination such as 'admin@web1'");
+	}
+	if host.starts_with('-') {
+		bail!("{key}.host: must not start with '-'");
+	}
+	let ssh_args = ssh_args.unwrap_or_default();
+	if ssh_args.iter().any(|arg| arg.is_empty()) {
+		bail!("{key}.ssh_args: arguments must not be empty");
+	}
+	Ok(Some(RemoteHost { host, ssh_args }))
 }
 
 fn check_range<T: PartialOrd + std::fmt::Display + Copy>(
@@ -458,12 +519,18 @@ impl RawConfig {
 				for (index, raw) in raw_sources.into_iter().enumerate() {
 					let key = format!("source[{index}]");
 					sources.push(match raw {
-						RawSource::Journald { units, label } => {
+						RawSource::Journald {
+							units,
+							host,
+							ssh_args,
+							label,
+						} => {
 							if units.iter().any(|unit| unit.trim().is_empty()) {
 								bail!("{key}.units: unit names must not be empty");
 							}
 							SourceConfig::Journald {
 								units,
+								remote: check_remote(&key, host, ssh_args)?,
 								label: check_label(&format!("{key}.label"), label)?,
 							}
 						}
@@ -656,6 +723,60 @@ color = "#3cc8ff"
 				label: None
 			}
 		);
+	}
+
+	#[test]
+	fn remote_journald_source() {
+		let config = Config::parse(
+			r#"
+[[source]]
+type = "journald"
+host = "admin@web1"
+ssh_args = ["-C", "-p", "2222"]
+units = ["nginx.service"]
+"#,
+		)
+		.unwrap();
+		assert_eq!(
+			config.sources,
+			vec![SourceConfig::Journald {
+				units: vec!["nginx.service".into()],
+				remote: Some(RemoteHost {
+					host: "admin@web1".into(),
+					ssh_args: vec!["-C".into(), "-p".into(), "2222".into()],
+				}),
+				label: None,
+			}]
+		);
+	}
+
+	#[test]
+	fn remote_journald_errors() {
+		let source = |keys: &str| error_of(&format!("[[source]]\ntype = \"journald\"\n{keys}\n"));
+		assert!(source(r#"host = """#).contains("source[0].host"));
+		assert!(source(r#"host = "a b""#).contains("source[0].host"));
+		assert!(source(r#"host = "-oProxyCommand=x""#).contains("must not start with '-'"));
+		assert!(
+			source(
+				r#"host = "h"
+ssh_args = [""]"#
+			)
+			.contains("source[0].ssh_args")
+		);
+		assert!(source(r#"ssh_args = ["-C"]"#).contains("only allowed together with host"));
+	}
+
+	#[test]
+	fn local_journal_needs_platform_support() {
+		let local = Config::parse("").unwrap();
+		assert!(local.check_local_journal(true).is_ok());
+		let error = format!("{:#}", local.check_local_journal(false).unwrap_err());
+		assert!(error.contains("source[0]") && error.contains("set host"));
+
+		let remote = Config::parse("[[source]]\ntype = \"journald\"\nhost = \"h\"\n").unwrap();
+		assert!(remote.check_local_journal(false).is_ok());
+		let none = Config::parse("source = []").unwrap();
+		assert!(none.check_local_journal(false).is_ok());
 	}
 
 	#[test]

@@ -24,11 +24,12 @@ pub use process::{ChildGroup, GroupChild, terminate_children};
 pub fn spawn(config: &SourceConfig, context: SourceContext, preload: usize) {
 	let fallback = context.clone();
 	let started = match config {
-		SourceConfig::Journald { units, .. } => {
+		SourceConfig::Journald { units, remote, .. } => {
 			let units = units.clone();
+			let remote = remote.clone();
 			thread::Builder::new()
 				.name(format!("source-journald-{}", context.id))
-				.spawn(move || journald::run(units, context, preload))
+				.spawn(move || journald::run(units, remote, context, preload))
 		}
 		SourceConfig::File { path, .. } => {
 			let pattern = path.clone();
