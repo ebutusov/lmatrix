@@ -10,7 +10,8 @@ This document is the complete implementation brief. Where it gives a number, tha
 
 ### Goals
 
-- Single binary, `lmatrix`, for a single Linux host.
+- Single binary, `lmatrix`, for a single Linux host, or for one or more remote hosts whose journals are read over ssh (see 6.1).
+- Also builds for Windows, to run in Windows Terminal against remote journals (see 6.6).
 - Runs in terminal emulators, typically over SSH: Windows Terminal, PuTTY, and inside tmux must all work.
 - Sources, rules and visual parameters come from a TOML config file.
 - Looks like classic Matrix rain at all times, on a busy host and on an idle one.
@@ -18,11 +19,11 @@ This document is the complete implementation brief. Where it gives a number, tha
 
 ### Non-goals
 
-- Multiple hosts, remote collection, or any network listener.
+- Any network listener, or remote collection other than running `journalctl` over ssh.
 - CPU, memory, network or other system metrics. The screen shows logs only.
 - Mouse support.
 - Linux virtual console (`TERM=linux`) specific tricks such as palette redefinition.
-- Native Windows or macOS builds.
+- macOS builds.
 - Persisting state (backlog, acknowledgements) across restarts.
 - Reading `/dev/kmsg` directly. Kernel messages arrive through journald.
 
@@ -184,17 +185,20 @@ Each source runs in its own thread and sends lines over a bounded channel (capac
 - Line text: `<SYSLOG_IDENTIFIER>[<_PID>]: <MESSAGE>`; omit the `[pid]` part when there is no PID, and fall back to `_COMM` when there is no identifier. `MESSAGE` can be a JSON array of byte values when it is not valid UTF-8; decode it lossily.
 - Timestamp: `__REALTIME_TIMESTAMP` (microseconds since the epoch).
 - Do not link against libsystemd.
+- Only `MESSAGE`, `SYSLOG_IDENTIFIER`, `_PID` and `_COMM` are requested (`--output-fields`, systemd 236+); journalctl adds the cursor and timestamps by itself. About half the output size.
+- When journalctl exits, it is started again after 5 s with `--after-cursor=<last cursor>`, so no entry is lost or repeated.
+- **Remote (`host`).** With `host = "<ssh destination>"`, journalctl runs on that host through `ssh -T -o BatchMode=yes -o ServerAliveInterval=15 -o ServerAliveCountMax=2 <ssh_args> -- <host> <command>`. Each journalctl argument is single-quoted for the remote shell. Authentication must work without a prompt (keys or an agent). The backlog is read by a first run without `-f` that ends after `-n <preload>` entries, then a second run follows with `--after-cursor`. The local heuristic of 6.4 is not used, because clock skew and network latency break it. ssh's stderr is reported as `lmatrix: journalctl on <host>: …` lines.
 
 ### 6.2 `file`
 
 - `path` is a glob. All matching files are followed. The glob is re-evaluated every 5 seconds to pick up new files.
 - At startup, the last `preload` lines of each file are read as preloaded lines; then the file is followed from its end.
-- Poll for new data every 250 ms. Detect rotation (inode change) and truncation (size shrinks) and reopen from the start of the new file.
+- Poll for new data every 250 ms. Detect rotation (a different file identity: device and inode on Unix, volume serial and file index on Windows) and truncation (size shrinks) and reopen from the start of the new file.
 - Timestamp: time of reception. Do not try to parse timestamps out of the text.
 
 ### 6.3 `command`
 
-- Runs `run` through `sh -c` and reads lines from its stdout and stderr.
+- Runs `run` through `sh -c` (`powershell -NoProfile -NonInteractive -Command` on Windows) and reads lines from its stdout and stderr.
 - If the command exits and `restart = true` (default), it is started again after `restart_delay` (default 5 s).
 - No preload.
 
@@ -208,6 +212,13 @@ Each source runs in its own thread and sends lines over a bounded channel (capac
 - A source may have an optional `label`; when set, each of its lines is prefixed with `label: `.
 - Source errors (child process fails to start, `journalctl` reports a permission problem, a file disappears) are reported as ordinary lines with the text `lmatrix: <description>`, so they show up in the backlog and can be matched by rules. A failing source never terminates the app.
 - All child processes are terminated when the app exits.
+
+### 6.6 Windows
+
+- No local journal: a journald source must set `host`. Otherwise, including when no config file exists, startup fails with an error that says so (`--demo` excepted).
+- Config file: `%APPDATA%\lmatrix\config.toml`.
+- Each child runs in a job object with kill-on-close, and without a console of its own. Children are stopped on exit, and also when lmatrix is killed or its window is closed.
+- SIGHUP and terminal hang-up detection do not exist there; closing the console window ends the process.
 
 ---
 
@@ -375,6 +386,7 @@ lmatrix/
     │   ├── journald.rs
     │   ├── file.rs
     │   ├── command.rs
+    │   ├── process.rs   # child processes: process groups / job objects
     │   └── demo.rs      # fake generator for --demo
     ├── sim/
     │   ├── mod.rs       # Sim: push, tick, resize, ack

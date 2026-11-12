@@ -45,6 +45,8 @@ preload = 200             # lines read at startup per journald/file source (0..1
 type = "journald"         # runs journalctl -f -o json
 units = []                # e.g. ["ssh.service", "nginx.service"]; empty = everything
 # label = "sys"
+# host = "admin@web1"     # read this host's journal over ssh (required on Windows)
+# ssh_args = ["-C"]       # extra ssh arguments, e.g. ["-C", "-p", "2222"]
 
 # [[source]]
 # type = "file"
@@ -52,7 +54,7 @@ units = []                # e.g. ["ssh.service", "nginx.service"]; empty = every
 
 # [[source]]
 # type = "command"
-# run = "docker logs -f web"      # run through sh -c; stdout and stderr are read
+# run = "docker logs -f web"      # run through sh -c (PowerShell on Windows)
 # restart = true                  # start again when it exits
 # restart_delay = "5s"            # at least 100ms
 

@@ -1,6 +1,7 @@
 # lmatrix
 
-A Matrix-rain style log viewer for Linux terminals. The rain is made of real
+A Matrix-rain style log viewer for Linux terminals, and for Windows Terminal
+when it reads a remote host's journal over ssh. The rain is made of real
 log text. Lines that match your rules "decode" out of the rain into readable
 text and stay on screen for a set time or until you acknowledge them. Tail
 mode shows the complete backlog as a plain log view.
@@ -102,8 +103,11 @@ lmatrix uses the first config file it finds:
 
 1. `--config <path>`
 2. `$XDG_CONFIG_HOME/lmatrix/config.toml`, or `~/.config/lmatrix/config.toml`
-3. `/etc/lmatrix/config.toml`
+   (on Windows: `%APPDATA%\lmatrix\config.toml`)
+3. `/etc/lmatrix/config.toml` (not on Windows)
 4. If none exists, built-in defaults: one `journald` source and no rules.
+   Windows has no local journal, so there this is an error that tells you to
+   write a config.
 
 Unknown keys, out-of-range values, invalid colors, durations and regexes are
 startup errors that name the offending key or rule. Colors are written
@@ -153,12 +157,18 @@ type = "journald"          # runs journalctl -f -o json -n <preload>
 units = ["ssh.service"]    # adds -u <unit> for each; empty = everything
 
 [[source]]
+type = "journald"
+host = "admin@web1"        # runs journalctl on this host through ssh
+ssh_args = ["-C"]          # extra ssh arguments, e.g. ["-C", "-p", "2222"]
+label = "web1"
+
+[[source]]
 type = "file"
 path = "/var/log/myapp/*.log"   # a glob, re-evaluated every 5 seconds
 
 [[source]]
 type = "command"
-run = "docker logs -f web"      # run through sh -c; stdout and stderr are read
+run = "docker logs -f web"      # run through sh -c (PowerShell on Windows)
 restart = true                  # start it again when it exits
 restart_delay = "5s"            # at least 100ms
 ```
@@ -167,14 +177,31 @@ restart_delay = "5s"            # at least 100ms
   this way too. Reading the whole journal usually needs membership in the
   `systemd-journal` group, or root. Without it you only see your own user's
   messages, and journalctl's warning shows up as a `lmatrix:` line in the
-  backlog.
+  backlog. lmatrix asks journalctl only for the fields it shows, which needs
+  systemd 236 or later. When journalctl exits, lmatrix starts it again after
+  5 s and continues right after the last entry it received.
+- **journald with `host`.** lmatrix runs
+  `ssh -T -o BatchMode=yes -o ServerAliveInterval=15 <ssh_args> -- <host> journalctl …`
+  and only log text crosses the network, instead of full-screen redraws
+  when you run lmatrix on the server over ssh. `"-C"` in `ssh_args`
+  compresses it further. `host` can be anything ssh accepts, including a
+  `Host` alias from `~/.ssh/config`.
+  - ssh cannot ask for a password or confirm a new host key here: use key
+    authentication (an agent works too) and connect once by hand first.
+  - A dropped connection is retried every 5 s and resumes where it stopped,
+    without gaps or repeated lines.
+  - ssh's error messages show up as `lmatrix: journalctl on <host>: …`
+    lines.
+  - The same group or root rules for reading the journal apply to the
+    remote user.
 - **file.** At startup, the last `preload` lines of every matching file are
   loaded. lmatrix then follows each file from its end, polling every 250 ms.
   When a file is rotated or truncated, it is reopened from the start.
 - **command.** Has no preload.
 
-Child processes (`journalctl`, commands, and anything they start) run in their
-own process group and are stopped when lmatrix exits.
+Child processes (`journalctl`, `ssh`, commands, and anything they start) run
+in their own process group (a job object on Windows) and are stopped when
+lmatrix exits.
 
 Source problems (a command fails to start, a permission error, a file that
 disappears) show up as ordinary lines starting with `lmatrix: `, so you can
@@ -267,6 +294,17 @@ don't know these sequences ignore them.
     outer terminal and set `color = "truecolor"`:
     `set -as terminal-features ",xterm-256color:RGB"` (tmux 3.2+), or
     `set -ga terminal-overrides ",xterm-256color:Tc"` on older versions.
+- **Windows.** Build it with `cargo build --release` on Windows, then run
+  `lmatrix.exe` in Windows Terminal (PowerShell or cmd). Windows Terminal
+  sets `COLORTERM=truecolor`, so colors are detected.
+  - There is no local journal: every `journald` source needs `host`.
+    `ssh.exe` comes from the OpenSSH client that ships with Windows 10 and
+    later. For key passphrases, use the `ssh-agent` service.
+  - `command` sources run through PowerShell
+    (`powershell -NoProfile -NonInteractive -Command`).
+  - `file` sources work. Rotation is detected by file identity, as on Linux.
+  - Children run in a job object, so `ssh.exe` also ends when lmatrix is
+    killed or its tab is closed.
 - **Small terminals.** Below 20×6, lmatrix shows only `terminal too small`
   until the window grows.
 
@@ -280,6 +318,14 @@ are cut at 4096 characters.
 ```sh
 cargo test
 cargo clippy --all-targets -- -D warnings
+```
+
+To check that the Windows code still compiles from Linux (no linker
+needed):
+
+```sh
+rustup target add x86_64-pc-windows-gnu
+cargo clippy --target x86_64-pc-windows-gnu --all-targets -- -D warnings
 ```
 
 The `sim` module never touches the terminal, and its random generator is
@@ -305,6 +351,9 @@ It checks:
 - **Untrusted input:** escape sequences in log lines are stripped.
 - **Size:** the too-small message, and resizing.
 - **Lost terminal:** the process exits when its terminal is closed.
+- **Remote journald:** a fake `ssh` runs the remote command locally. Backlog
+  lines are not decoded, live lines are, and journalctl is stopped on quit.
+  It needs a readable journal and `logger`; otherwise it is skipped.
 
 ### Code map
 
@@ -322,10 +371,11 @@ the cells that changed.
 | `src/line.rs` | `LogLine`, `SourceMsg` (preload / preload done / live), sanitizing untrusted text, truncation |
 | `src/rules.rs` | Highlight rules and `RuleSet`: one regex-set pass per line, first match wins |
 | `src/backlog.rs` | Bounded ring buffer of received lines with their matched rule |
-| `src/source/mod.rs` | Starts a thread per source; `SourceContext` for sending lines and errors; child process groups and their cleanup |
-| `src/source/journald.rs` | `journald` source: runs `journalctl -f -o json` and formats entries |
+| `src/source/mod.rs` | Starts a thread per source; `SourceContext` for sending lines and errors; line splitting |
+| `src/source/process.rs` | Child processes: process groups (Unix) or job objects (Windows), stopping them all on exit |
+| `src/source/journald.rs` | `journald` source: runs journalctl locally or through ssh, reads the backlog, resumes by cursor, formats entries |
 | `src/source/file.rs` | `file` source: follows every file matching a glob, handles rotation and truncation |
-| `src/source/command.rs` | `command` source: runs a shell command, reads stdout and stderr, restarts it |
+| `src/source/command.rs` | `command` source: runs a shell command (sh or PowerShell), reads stdout and stderr, restarts it |
 | `src/source/demo.rs` | Fake line generator and demo rules for `--demo` |
 | `src/sim/mod.rs` | `Sim`: push, tick, resize, ack; ties the backlog, rules, rain and caught lines together; replay and `strip_pattern`. Never touches the terminal |
 | `src/sim/rain.rs` | Falling drops, fading cells, fill factor |
