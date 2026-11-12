@@ -126,7 +126,8 @@ When live lines do not keep the rain filled, old lines are replayed so the scree
 
 - Active only when `replay = true` (default) and the backlog is not empty.
 - While the number of active drops is below `floor(max_drops × (1 − replay_reserve))` (`replay_reserve` default 0.15), spawn replay drops at an average rate of 14 per second. The reserve keeps slots free for live lines on a quiet host.
-- A replay drop takes a random backlog entry and starts at a **random character position** in its text, wrapping around, so columns do not all begin with the same prefix.
+- A replay drop takes a random entry from the newest `replay_window` backlog lines (all of them if the backlog is shorter). With `replay_window = "auto"` (default) the window is `max(100, 4 × floor(max_drops × (1 − replay_reserve)))`, recomputed on every pick, so it follows resizes. With a small fixed window, a wide screen with many replay slots would show the same few lines in many columns at once.
+- It starts at a **random character position** in its text, wrapping around, so columns do not all begin with the same prefix.
 - Replay drops are always in the default color, even if the original line matched a rule, and never trigger rules again. Color in the rain therefore always means a live event.
 - Replay drops are dimmer: the head is drawn normally, and every cell behind the head is clamped to `replay_brightness` (default 0.55) as soon as the head moves on.
 - Replays are not added to the backlog and never appear in tail mode or the backlog window.
@@ -309,6 +310,7 @@ fade_half_life = "480ms"
 replay = true
 replay_brightness = 0.55  # 0.1..1.0
 replay_reserve = 0.15     # share of slots kept free for live lines
+replay_window = "auto"    # newest N backlog lines replays pick from, or "auto"
 
 [tail]
 backlog = 10000           # lines kept in memory

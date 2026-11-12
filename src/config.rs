@@ -7,7 +7,7 @@ use anyhow::{Context, Result, anyhow, bail};
 use serde::Deserialize;
 
 use crate::rules::Rule;
-use crate::sim::SimSettings;
+use crate::sim::{ReplayWindow, SimSettings};
 use crate::term::Rgb;
 
 /// The commented default configuration printed by `--print-default-config`.
@@ -44,7 +44,7 @@ pub struct RainConfig {
 	pub replay: bool,
 	pub replay_brightness: f32,
 	pub replay_reserve: f32,
-	pub replay_window: usize,
+	pub replay_window: ReplayWindow,
 	pub min_brightness: f32,
 	/// Regex whose first match is removed from rain text; `None` = off.
 	pub strip_pattern: Option<String>,
@@ -132,7 +132,7 @@ impl Default for Config {
 				replay: true,
 				replay_brightness: 0.55,
 				replay_reserve: 0.15,
-				replay_window: 100,
+				replay_window: ReplayWindow::Auto,
 				min_brightness: 0.3,
 				strip_pattern: Some(DEFAULT_STRIP_PATTERN.to_string()),
 			},
@@ -288,7 +288,7 @@ struct RawRain {
 	replay: Option<bool>,
 	replay_brightness: Option<f32>,
 	replay_reserve: Option<f32>,
-	replay_window: Option<usize>,
+	replay_window: Option<StringOrInt>,
 	min_brightness: Option<f32>,
 	strip_pattern: Option<String>,
 }
@@ -481,12 +481,18 @@ impl RawConfig {
 					0.0,
 					1.0,
 				)?,
-				replay_window: check_range(
-					"rain.replay_window",
-					raw.replay_window.unwrap_or(defaults.rain.replay_window),
-					1,
-					10_000_000,
-				)?,
+				replay_window: match raw.replay_window {
+					None => defaults.rain.replay_window,
+					Some(StringOrInt::Text(text)) if text == "auto" => ReplayWindow::Auto,
+					Some(StringOrInt::Text(other)) => {
+						bail!("rain.replay_window: must be \"auto\" or a number, got '{other}'")
+					}
+					Some(StringOrInt::Number(lines)) => {
+						ReplayWindow::Lines(
+							check_range("rain.replay_window", lines, 1, 10_000_000)? as usize,
+						)
+					}
+				},
 				min_brightness: check_range(
 					"rain.min_brightness",
 					raw.min_brightness.unwrap_or(defaults.rain.min_brightness),
@@ -618,6 +624,15 @@ mod tests {
 		assert_eq!(config.tail, defaults.tail);
 		assert_eq!(config.sources, vec![SourceConfig::default_journald()]);
 		assert!(config.rules.is_empty());
+	}
+
+	#[test]
+	fn replay_window_accepts_auto_and_numbers() {
+		let auto = Config::parse("[rain]\nreplay_window = \"auto\"\n").unwrap();
+		assert_eq!(auto.rain.replay_window, ReplayWindow::Auto);
+		let fixed = Config::parse("[rain]\nreplay_window = 250\n").unwrap();
+		assert_eq!(fixed.rain.replay_window, ReplayWindow::Lines(250));
+		assert_eq!(fixed.sim_settings().replay_window, ReplayWindow::Lines(250));
 	}
 
 	#[test]
@@ -813,6 +828,7 @@ ssh_args = [""]"#
 		assert!(error_of("[rain]\nspeed = 0\n").contains("rain.speed"));
 		assert!(error_of("[rain]\nmin_brightness = 1.5\n").contains("rain.min_brightness"));
 		assert!(error_of("[rain]\nreplay_window = 0\n").contains("rain.replay_window"));
+		assert!(error_of("[rain]\nreplay_window = \"big\"\n").contains("rain.replay_window"));
 		assert!(error_of("[tail]\nbacklog = 0\n").contains("tail.backlog"));
 		assert!(error_of("[display]\ncolor = \"8\"\n").contains("display.color"));
 	}
