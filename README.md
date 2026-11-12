@@ -269,6 +269,106 @@ color = "truecolor"
 or forward the variable. Add `SendEnv COLORTERM` to your local `~/.ssh/config`
 and `AcceptEnv COLORTERM` to the server's `sshd_config`.
 
+## Windows
+
+lmatrix runs in Windows Terminal (PowerShell or cmd) and shows the journals
+of your Linux servers, read over ssh. Build it on Windows with
+`cargo build --release` and run `target\release\lmatrix.exe`. Windows
+Terminal sets `COLORTERM=truecolor`, so colors are detected.
+
+- There is no local journal: every `journald` source needs `host`. Without a
+  config file, lmatrix stops with an error that says so (`--demo` still
+  works).
+- `ssh.exe` comes from the OpenSSH client that ships with Windows 10 and
+  later.
+- `command` sources run through PowerShell
+  (`powershell -NoProfile -NonInteractive -Command`).
+- `file` sources work. Paths can use `\` or `/`, and rotation is detected as
+  on Linux.
+- Child processes run in a job object, so `ssh.exe` also ends when lmatrix is
+  killed or its tab is closed.
+
+### Setting it up
+
+ssh runs without a prompt, so set up key authentication first and connect
+to each host once by hand to accept its host key:
+
+```powershell
+ssh-keygen -t ed25519                          # once, if you have no key yet
+type $env:USERPROFILE\.ssh\id_ed25519.pub | ssh admin@web1 "cat >> ~/.ssh/authorized_keys"
+ssh admin@web1 journalctl -n 1                 # accepts the host key, checks journal access
+
+# If your key has a passphrase, let the agent hold it (Start-Service and
+# Set-Service need an administrator PowerShell):
+Set-Service ssh-agent -StartupType Automatic
+Start-Service ssh-agent
+ssh-add
+```
+
+Then create the config and check it:
+
+```powershell
+New-Item -ItemType Directory -Force "$env:APPDATA\lmatrix" | Out-Null
+notepad "$env:APPDATA\lmatrix\config.toml"
+.\lmatrix.exe --check
+```
+
+### Example config
+
+`%APPDATA%\lmatrix\config.toml`:
+
+```toml
+[display]
+color = "truecolor"           # optional: Windows Terminal is detected anyway
+
+# The whole journal of one server. -C compresses the ssh traffic.
+[[source]]
+type = "journald"
+host = "admin@web1"
+ssh_args = ["-C"]
+label = "web1"
+
+# Two units of another server, through a Host alias from
+# %USERPROFILE%\.ssh\config, on a non-standard port.
+[[source]]
+type = "journald"
+host = "db1"
+ssh_args = ["-C", "-p", "2222"]
+units = ["postgresql.service", "ssh.service"]
+label = "db1"
+
+# Any other command, run through PowerShell.
+[[source]]
+type = "command"
+run = "ssh -T admin@web1 tail -F /var/log/nginx/error.log"
+label = "nginx"
+
+# A local log file.
+[[source]]
+type = "file"
+path = 'C:\ProgramData\MyApp\logs\*.log'
+label = "myapp"
+
+[[rule]]
+name = "oom"
+pattern = "(?i)out of memory|oom-killer"
+color = "#ff463c"
+hold = "ack"
+
+[[rule]]
+name = "auth-fail"
+pattern = "Failed password for \\S+"
+color = "#ffb428"
+hold = "30s"
+
+# ssh and journalctl problems arrive as "lmatrix: ..." lines.
+[[rule]]
+name = "source-problem"
+pattern = "^lmatrix: "
+color = "#ff8c00"
+hold = "ack"
+```
+
 ## Terminal notes
 
 lmatrix uses the alternate screen, raw mode, a hidden cursor and disabled
@@ -294,17 +394,7 @@ don't know these sequences ignore them.
     outer terminal and set `color = "truecolor"`:
     `set -as terminal-features ",xterm-256color:RGB"` (tmux 3.2+), or
     `set -ga terminal-overrides ",xterm-256color:Tc"` on older versions.
-- **Windows.** Build it with `cargo build --release` on Windows, then run
-  `lmatrix.exe` in Windows Terminal (PowerShell or cmd). Windows Terminal
-  sets `COLORTERM=truecolor`, so colors are detected.
-  - There is no local journal: every `journald` source needs `host`.
-    `ssh.exe` comes from the OpenSSH client that ships with Windows 10 and
-    later. For key passphrases, use the `ssh-agent` service.
-  - `command` sources run through PowerShell
-    (`powershell -NoProfile -NonInteractive -Command`).
-  - `file` sources work. Rotation is detected by file identity, as on Linux.
-  - Children run in a job object, so `ssh.exe` also ends when lmatrix is
-    killed or its tab is closed.
+- **Windows.** See [Windows](#windows).
 - **Small terminals.** Below 20×6, lmatrix shows only `terminal too small`
   until the window grows.
 
