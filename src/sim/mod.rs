@@ -222,7 +222,6 @@ impl Sim {
 			dt,
 			self.settings.fade_half_life,
 			self.settings.replay_brightness,
-			&mut self.rng,
 		);
 		self.caught.tick(
 			self.now,

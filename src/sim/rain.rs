@@ -6,7 +6,7 @@ use fastrand::Rng;
 
 use crate::term::Rgb;
 
-/// Glyphs used in place of spaces and for undecoded characters.
+/// Glyphs used for undecoded characters.
 pub const GLYPHS: &[char] = &[
 	'0', '1', '2', '3', '4', '5', '6', '7', '8', '9', 'a', 'b', 'c', 'd', 'e', 'f', ':', '/', '[',
 	']', '<', '>', '=', '+', '-', '*', '#', '%', '&', '$', '@',
@@ -191,13 +191,7 @@ impl Rain {
 	}
 
 	/// Advances time: fades cells, moves drops, removes finished drops.
-	pub fn tick(
-		&mut self,
-		dt: Duration,
-		fade_half_life: Duration,
-		replay_brightness: f32,
-		rng: &mut Rng,
-	) {
+	pub fn tick(&mut self, dt: Duration, fade_half_life: Duration, replay_brightness: f32) {
 		let half_life = fade_half_life.as_secs_f32().max(0.001);
 		let factor = 0.5f32.powf(dt.as_secs_f32() / half_life);
 		for cell in &mut self.cells {
@@ -221,7 +215,7 @@ impl Rain {
 					column_drops[drop.col as usize] -= 1;
 					return false;
 				}
-				write_head(cells, cols, drop, rng);
+				write_head(cells, cols, drop);
 				return true;
 			}
 			drop.progress += drop.speed * seconds;
@@ -236,7 +230,7 @@ impl Rain {
 					column_drops[drop.col as usize] -= 1;
 					return false;
 				}
-				write_head(cells, cols, drop, rng);
+				write_head(cells, cols, drop);
 			}
 			true
 		});
@@ -244,13 +238,9 @@ impl Rain {
 }
 
 /// Writes the drop's next character at its head position and moves on.
-fn write_head(cells: &mut [RainCell], cols: usize, drop: &mut RainDrop, rng: &mut Rng) {
-	let mut ch = drop.char_for_row(drop.next_row);
-	if ch == ' ' {
-		ch = random_glyph(rng);
-	}
+fn write_head(cells: &mut [RainCell], cols: usize, drop: &mut RainDrop) {
 	cells[drop.next_row as usize * cols + drop.col as usize] = RainCell {
-		ch,
+		ch: drop.char_for_row(drop.next_row),
 		color: drop.color,
 		level: 1.0,
 	};
@@ -279,40 +269,26 @@ mod tests {
 		let mut rain = Rain::new(1, 7);
 		assert!(rain.spawn(spec("abc"), 10.0, &mut rng));
 		for _ in 0..7 {
-			rain.tick(
-				Duration::from_millis(100),
-				Duration::from_millis(480),
-				0.55,
-				&mut rng,
-			);
+			rain.tick(Duration::from_millis(100), Duration::from_millis(480), 0.55);
 		}
 		let column: String = (0..7).map(|row| rain.cell(0, row).ch).collect();
 		assert_eq!(column, "abcabca");
 		assert_eq!(rain.active_drops(), 1);
-		rain.tick(
-			Duration::from_millis(100),
-			Duration::from_millis(480),
-			0.55,
-			&mut rng,
-		);
+		rain.tick(Duration::from_millis(100), Duration::from_millis(480), 0.55);
 		assert_eq!(rain.active_drops(), 0);
 		assert!(rain.has_free_column());
 	}
 
 	#[test]
-	fn spaces_become_glyphs() {
+	fn spaces_stay_spaces() {
 		let mut rng = Rng::with_seed(2);
 		let mut rain = Rain::new(1, 3);
 		rain.spawn(spec("a b"), 30.0, &mut rng);
-		rain.tick(Duration::ZERO, Duration::from_millis(480), 0.55, &mut rng);
-		rain.tick(
-			Duration::from_millis(70),
-			Duration::from_millis(480),
-			0.55,
-			&mut rng,
-		);
+		rain.tick(Duration::ZERO, Duration::from_millis(480), 0.55);
+		rain.tick(Duration::from_millis(70), Duration::from_millis(480), 0.55);
 		assert_eq!(rain.cell(0, 0).ch, 'a');
-		assert!(GLYPHS.contains(&rain.cell(0, 1).ch));
+		assert_eq!(rain.cell(0, 1).ch, ' ');
+		assert_eq!(rain.cell(0, 1).level, 1.0);
 		assert_eq!(rain.cell(0, 2).ch, 'b');
 	}
 
@@ -324,11 +300,11 @@ mod tests {
 		let mut fine = Rain::new(1, 10);
 		coarse.spawn(spec("x"), 1.0, &mut rng);
 		fine.spawn(spec("x"), 1.0, &mut rng);
-		coarse.tick(Duration::ZERO, half_life, 0.55, &mut rng);
-		fine.tick(Duration::ZERO, half_life, 0.55, &mut rng);
-		coarse.tick(Duration::from_millis(480), half_life, 0.55, &mut rng);
+		coarse.tick(Duration::ZERO, half_life, 0.55);
+		fine.tick(Duration::ZERO, half_life, 0.55);
+		coarse.tick(Duration::from_millis(480), half_life, 0.55);
 		for _ in 0..48 {
-			fine.tick(Duration::from_millis(10), half_life, 0.55, &mut rng);
+			fine.tick(Duration::from_millis(10), half_life, 0.55);
 		}
 		assert!((coarse.cell(0, 0).level - 0.5).abs() < 0.001);
 		assert!((fine.cell(0, 0).level - 0.5).abs() < 0.01);
@@ -346,14 +322,9 @@ mod tests {
 			10.0,
 			&mut rng,
 		);
-		rain.tick(Duration::ZERO, Duration::from_secs(100), 0.55, &mut rng);
+		rain.tick(Duration::ZERO, Duration::from_secs(100), 0.55);
 		assert_eq!(rain.cell(0, 0).level, 1.0);
-		rain.tick(
-			Duration::from_millis(100),
-			Duration::from_secs(100),
-			0.55,
-			&mut rng,
-		);
+		rain.tick(Duration::from_millis(100), Duration::from_secs(100), 0.55);
 		assert!(rain.cell(0, 0).level <= 0.55);
 		assert!(rain.cell(0, 1).level > 0.95);
 	}

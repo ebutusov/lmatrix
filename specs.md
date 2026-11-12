@@ -103,7 +103,7 @@ A drop is one log line falling down one column.
 - A new drop starts at the top row of the rain area in a **random column that has no active drop**.
 - Its speed is `speed × uniform(1 − speed_jitter, 1 + speed_jitter)` rows per second. Defaults: `speed = 16`, `speed_jitter = 0.35`.
 - Each time the drop advances one row, it writes the next character of its text into that cell.
-  - A space in the text is written as a random glyph from `0123456789abcdef:/[]<>=+-*#%&$@`, chosen once when the cell is written.
+  - A space in the text is written as a space, so words stay readable. It overwrites the cell like any other character.
   - If the text is shorter than the rain area, it wraps around and continues from its first character.
   - If the text is longer, the drop simply ends at the bottom; the rest is not shown.
 - The drop ends when it leaves the bottom of the rain area. Its column is then free again.
