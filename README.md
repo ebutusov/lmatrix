@@ -1,5 +1,7 @@
 # lmatrix
 
+[![CI](https://github.com/ebutusov/lmatrix/actions/workflows/ci.yml/badge.svg)](https://github.com/ebutusov/lmatrix/actions/workflows/ci.yml)
+
 A Matrix-rain style log viewer for Linux terminals, and for Windows Terminal
 when it reads a remote host's journal over ssh. The rain is made of real
 log text. Lines that match your rules "decode" out of the rain into readable
