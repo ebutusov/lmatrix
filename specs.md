@@ -210,7 +210,7 @@ Each source runs in its own thread and sends lines over a bounded channel (capac
 
 ### 6.5 Labels and failures **(assumption)**
 
-- A source may have an optional `label`; when set, each of its lines is prefixed with `label: `.
+- A source may have an optional `label`; when set, each of its lines is prefixed with `(label) `.
 - Source errors (child process fails to start, `journalctl` reports a permission problem, a file disappears) are reported as ordinary lines with the text `lmatrix: <description>`, so they show up in the backlog and can be matched by rules. A failing source never terminates the app.
 - All child processes are terminated when the app exits.
 

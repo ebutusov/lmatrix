@@ -137,7 +137,7 @@ startup errors that name the offending key or rule. Colors are written
 | `replay_brightness` | `0.55` | Brightness of replayed trails, 0.1..1.0 |
 | `replay_reserve` | `0.15` | Share of drop slots kept free for live lines, 0..1.0 |
 | `replay_window` | `"auto"` | Replays pick a random line from the newest N backlog lines, 1..10000000. `"auto"` uses 4 lines per replay slot (at least 100), so wider screens reach further back and repeat lines less. Set it to `tail.backlog` to replay from the whole backlog |
-| `strip_pattern` | `'^[^:]*:\s*'` | Regex whose first match is removed from the text shown in the rain; the default removes everything up to the first `:` (such as `sshd[123]: `). `""` turns it off. The backlog, tail mode, decoded lines and rules always use the full line. If nothing would be left, the full line rains |
+| `strip_pattern` | `'^[^:]*:\s*'` | Regex whose first match is removed from the text shown in the rain; the default removes everything up to the first `:` (such as `sshd[123]: `). `""` turns it off. The backlog, tail mode, decoded lines and rules always use the full line. If nothing would be left, the full line rains. A `[[source]]` can set its own `strip_pattern` |
 | `min_brightness` | `0.3` | Lowest brightness of a visible trail cell, 0..1.0. Trails stay readable to their end and then vanish, instead of fading into black. `0` restores the plain fade |
 
 ### `[tail]`
@@ -150,7 +150,10 @@ startup errors that name the offending key or rule. Colors are written
 ### `[[source]]`
 
 Each source may set `label = "name"`, which prefixes each of its lines with
-`name: `. Without any `[[source]]` section, a single journald source is used.
+`(name) `, and `strip_pattern`, which replaces `rain.strip_pattern` for its
+lines (`""` turns stripping off for that source). The pattern sees the whole
+line, label included. Without any `[[source]]` section, a single journald
+source is used.
 Write `source = []` to run with no sources at all.
 
 ```toml
@@ -167,6 +170,7 @@ label = "web1"
 [[source]]
 type = "file"
 path = "/var/log/myapp/*.log"   # a glob, re-evaluated every 5 seconds
+strip_pattern = '^\S+ \S+ '    # rain without this app's "date time " prefix
 
 [[source]]
 type = "command"

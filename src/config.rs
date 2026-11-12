@@ -64,16 +64,19 @@ pub enum SourceConfig {
 		/// Read the journal of this host over ssh instead of the local one.
 		remote: Option<RemoteHost>,
 		label: Option<String>,
+		strip_pattern: Option<String>,
 	},
 	File {
 		path: String,
 		label: Option<String>,
+		strip_pattern: Option<String>,
 	},
 	Command {
 		run: String,
 		restart: bool,
 		restart_delay: Duration,
 		label: Option<String>,
+		strip_pattern: Option<String>,
 	},
 }
 
@@ -86,11 +89,22 @@ impl SourceConfig {
 		}
 	}
 
+	/// This source's own `strip_pattern`: `None` means `rain.strip_pattern`
+	/// applies, `Some("")` turns stripping off for this source.
+	pub fn strip_pattern(&self) -> Option<&str> {
+		match self {
+			SourceConfig::Journald { strip_pattern, .. }
+			| SourceConfig::File { strip_pattern, .. }
+			| SourceConfig::Command { strip_pattern, .. } => strip_pattern.as_deref(),
+		}
+	}
+
 	pub fn default_journald() -> Self {
 		SourceConfig::Journald {
 			units: Vec::new(),
 			remote: None,
 			label: None,
+			strip_pattern: None,
 		}
 	}
 }
@@ -185,6 +199,11 @@ impl Config {
 
 	/// Settings for the simulation.
 	pub fn sim_settings(&self) -> SimSettings {
+		let global_strip = self
+			.rain
+			.strip_pattern
+			.as_deref()
+			.map(|pattern| regex::Regex::new(pattern).expect("validated"));
 		SimSettings {
 			speed: self.rain.speed,
 			speed_jitter: self.rain.speed_jitter,
@@ -194,11 +213,16 @@ impl Config {
 			replay_brightness: self.rain.replay_brightness,
 			replay_reserve: self.rain.replay_reserve,
 			replay_window: self.rain.replay_window,
-			strip_pattern: self
-				.rain
-				.strip_pattern
-				.as_deref()
-				.map(|pattern| regex::Regex::new(pattern).expect("validated")),
+			strip_pattern: global_strip.clone(),
+			source_strip_patterns: self
+				.sources
+				.iter()
+				.map(|source| match source.strip_pattern() {
+					None => global_strip.clone(),
+					Some("") => None,
+					Some(pattern) => Some(regex::Regex::new(pattern).expect("validated")),
+				})
+				.collect(),
 			default_color: self.display.default_color,
 			backlog: self.tail.backlog,
 			ascii_only: self.display.ascii_only,
@@ -309,16 +333,19 @@ enum RawSource {
 		host: Option<String>,
 		ssh_args: Option<Vec<String>>,
 		label: Option<String>,
+		strip_pattern: Option<String>,
 	},
 	File {
 		path: String,
 		label: Option<String>,
+		strip_pattern: Option<String>,
 	},
 	Command {
 		run: String,
 		restart: Option<bool>,
 		restart_delay: Option<String>,
 		label: Option<String>,
+		strip_pattern: Option<String>,
 	},
 }
 
@@ -371,6 +398,14 @@ fn check_range<T: PartialOrd + std::fmt::Display + Copy>(
 fn parse_duration(key: &str, text: &str) -> Result<Duration> {
 	humantime::parse_duration(text.trim())
 		.map_err(|error| anyhow!("{key}: invalid duration '{text}' ({error})"))
+}
+
+/// Checks a source's `strip_pattern`; `""` is kept and means off.
+fn check_strip_pattern(key: &str, pattern: Option<String>) -> Result<Option<String>> {
+	if let Some(text) = pattern.as_deref().filter(|text| !text.is_empty()) {
+		regex::Regex::new(text).map_err(|error| anyhow!("{key}: invalid regex: {error}"))?;
+	}
+	Ok(pattern)
 }
 
 fn check_label(key: &str, label: Option<String>) -> Result<Option<String>> {
@@ -530,6 +565,7 @@ impl RawConfig {
 							host,
 							ssh_args,
 							label,
+							strip_pattern,
 						} => {
 							if units.iter().any(|unit| unit.trim().is_empty()) {
 								bail!("{key}.units: unit names must not be empty");
@@ -538,9 +574,17 @@ impl RawConfig {
 								units,
 								remote: check_remote(&key, host, ssh_args)?,
 								label: check_label(&format!("{key}.label"), label)?,
+								strip_pattern: check_strip_pattern(
+									&format!("{key}.strip_pattern"),
+									strip_pattern,
+								)?,
 							}
 						}
-						RawSource::File { path, label } => {
+						RawSource::File {
+							path,
+							label,
+							strip_pattern,
+						} => {
 							if path.trim().is_empty() {
 								bail!("{key}.path: must not be empty");
 							}
@@ -550,6 +594,10 @@ impl RawConfig {
 							SourceConfig::File {
 								path,
 								label: check_label(&format!("{key}.label"), label)?,
+								strip_pattern: check_strip_pattern(
+									&format!("{key}.strip_pattern"),
+									strip_pattern,
+								)?,
 							}
 						}
 						RawSource::Command {
@@ -557,6 +605,7 @@ impl RawConfig {
 							restart,
 							restart_delay,
 							label,
+							strip_pattern,
 						} => {
 							if run.trim().is_empty() {
 								bail!("{key}.run: must not be empty");
@@ -575,6 +624,10 @@ impl RawConfig {
 								restart: restart.unwrap_or(true),
 								restart_delay,
 								label: check_label(&format!("{key}.label"), label)?,
+								strip_pattern: check_strip_pattern(
+									&format!("{key}.strip_pattern"),
+									strip_pattern,
+								)?,
 							}
 						}
 					});
@@ -716,7 +769,8 @@ color = "#3cc8ff"
 				run: "docker logs -f web".into(),
 				restart: false,
 				restart_delay: Duration::from_secs(2),
-				label: None
+				label: None,
+				strip_pattern: None,
 			}
 		);
 		assert_eq!(config.sources[0].label(), Some("sys"));
@@ -735,7 +789,8 @@ color = "#3cc8ff"
 				run: "yes".into(),
 				restart: true,
 				restart_delay: Duration::from_secs(5),
-				label: None
+				label: None,
+				strip_pattern: None,
 			}
 		);
 	}
@@ -761,6 +816,7 @@ units = ["nginx.service"]
 					ssh_args: vec!["-C".into(), "-p".into(), "2222".into()],
 				}),
 				label: None,
+				strip_pattern: None,
 			}]
 		);
 	}
@@ -886,6 +942,43 @@ ssh_args = [""]"#
 		assert_eq!(off.rain.strip_pattern, None);
 		assert!(off.sim_settings().strip_pattern.is_none());
 		assert!(error_of("[rain]\nstrip_pattern = \"(\"\n").contains("rain.strip_pattern"));
+	}
+
+	#[test]
+	fn per_source_strip_pattern() {
+		let config = Config::parse(
+			r#"
+[rain]
+strip_pattern = '^\S+ '
+
+[[source]]
+type = "file"
+path = "/a.log"
+
+[[source]]
+type = "file"
+path = "/b.log"
+strip_pattern = '^\[\w+\] '
+
+[[source]]
+type = "command"
+run = "yes"
+strip_pattern = ""
+"#,
+		)
+		.unwrap();
+		assert_eq!(config.sources[0].strip_pattern(), None);
+		assert_eq!(config.sources[1].strip_pattern(), Some(r"^\[\w+\] "));
+		assert_eq!(config.sources[2].strip_pattern(), Some(""));
+		let settings = config.sim_settings();
+		let patterns: Vec<Option<&str>> = settings
+			.source_strip_patterns
+			.iter()
+			.map(|pattern| pattern.as_ref().map(regex::Regex::as_str))
+			.collect();
+		assert_eq!(patterns, vec![Some(r"^\S+ "), Some(r"^\[\w+\] "), None]);
+		let error = error_of("[[source]]\ntype = \"file\"\npath = \"/a\"\nstrip_pattern = \"(\"\n");
+		assert!(error.contains("source[0].strip_pattern"), "{error}");
 	}
 
 	#[test]

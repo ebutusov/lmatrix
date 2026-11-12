@@ -188,11 +188,11 @@ mod tests {
 		worker.join().unwrap();
 
 		assert!(preload_done);
-		assert!(lines.contains(&"cmd: a".to_string()), "{lines:?}");
-		assert!(lines.contains(&"cmd: b".to_string()), "{lines:?}");
-		assert!(lines.contains(&"cmd: oops".to_string()), "{lines:?}");
-		let a_index = lines.iter().position(|line| line == "cmd: a").unwrap();
-		let b_index = lines.iter().position(|line| line == "cmd: b").unwrap();
+		assert!(lines.contains(&"(cmd) a".to_string()), "{lines:?}");
+		assert!(lines.contains(&"(cmd) b".to_string()), "{lines:?}");
+		assert!(lines.contains(&"(cmd) oops".to_string()), "{lines:?}");
+		let a_index = lines.iter().position(|line| line == "(cmd) a").unwrap();
+		let b_index = lines.iter().position(|line| line == "(cmd) b").unwrap();
 		assert!(a_index < b_index);
 		let last = lines.last().unwrap();
 		assert!(last.starts_with("lmatrix: command '"), "{last}");

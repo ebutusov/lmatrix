@@ -108,7 +108,13 @@ fn run(args: Args) -> Result<ExitCode> {
 	}
 
 	let rules = RuleSet::new(config.rules.clone())?;
-	let sim = Sim::new(config.sim_settings(), rules, Rng::new());
+	let mut settings = config.sim_settings();
+	if args.demo {
+		// The demo replaces the configured sources, so their own strip
+		// patterns do not apply; its lines use `rain.strip_pattern`.
+		settings.source_strip_patterns.clear();
+	}
+	let sim = Sim::new(settings, rules, Rng::new());
 
 	let (sender, receiver) = mpsc::sync_channel(CHANNEL_CAPACITY);
 	let ascii_only = config.display.ascii_only;

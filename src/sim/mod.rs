@@ -13,7 +13,7 @@ use fastrand::Rng;
 use regex::Regex;
 
 use crate::backlog::{Backlog, Entry};
-use crate::line::LogLine;
+use crate::line::{LogLine, SourceId};
 use crate::rules::RuleSet;
 use crate::term::Rgb;
 
@@ -55,6 +55,9 @@ pub struct SimSettings {
 	pub replay_window: ReplayWindow,
 	/// The first match is removed from the text shown in the rain.
 	pub strip_pattern: Option<Regex>,
+	/// Per-source `strip_pattern`, indexed by source id. Lines from a
+	/// source not listed here use `strip_pattern`.
+	pub source_strip_patterns: Vec<Option<Regex>>,
 	pub default_color: Rgb,
 	pub backlog: usize,
 	pub ascii_only: bool,
@@ -72,6 +75,7 @@ impl Default for SimSettings {
 			replay_reserve: 0.15,
 			replay_window: ReplayWindow::Auto,
 			strip_pattern: None,
+			source_strip_patterns: Vec::new(),
 			default_color: Rgb(0x28, 0xff, 0x6e),
 			backlog: 10_000,
 			ascii_only: false,
@@ -196,7 +200,7 @@ impl Sim {
 				// Matched lines always rain; the cap only guards against a
 				// flood of matching lines piling up thousands of drops.
 				if self.rain.active_drops() < self.max_forced_drops() {
-					let text = rain_text(&self.settings.strip_pattern, &line.text);
+					let text = rain_text(self.strip_pattern(line.source), &line.text);
 					self.rain.spawn(
 						DropSpec {
 							text: &text,
@@ -220,7 +224,7 @@ impl Sim {
 			}
 			None => {
 				if self.rain.active_drops() < self.max_drops() {
-					let text = rain_text(&self.settings.strip_pattern, &line.text);
+					let text = rain_text(self.strip_pattern(line.source), &line.text);
 					self.rain.spawn(
 						DropSpec {
 							text: &text,
@@ -291,7 +295,7 @@ impl Sim {
 			let index = self.backlog.len() - 1 - self.rng.usize(..window);
 			let text = match self.backlog.get(index) {
 				Some(entry) => {
-					rain_text(&self.settings.strip_pattern, &entry.line.text).into_owned()
+					rain_text(self.strip_pattern(entry.line.source), &entry.line.text).into_owned()
 				}
 				None => return,
 			};
@@ -310,6 +314,16 @@ impl Sim {
 				&mut self.rng,
 			);
 		}
+	}
+}
+
+impl Sim {
+	/// The strip pattern for lines from `source`.
+	fn strip_pattern(&self, source: SourceId) -> &Option<Regex> {
+		self.settings
+			.source_strip_patterns
+			.get(source)
+			.unwrap_or(&self.settings.strip_pattern)
 	}
 }
 
@@ -546,6 +560,30 @@ mod tests {
 		sim.tick(FRAME);
 		let caught: String = sim.caught_lines()[0].chars.iter().collect();
 		assert!(caught.contains("sshd[42]: CRIT session opened"));
+	}
+
+	#[test]
+	fn strip_pattern_per_source() {
+		let settings = SimSettings {
+			source_strip_patterns: vec![None, Some(Regex::new(r"^\[\w+\] ").unwrap())],
+			..stripping()
+		};
+		let mut sim = sim_with(settings, 80, 22);
+		let from = |source, text: &str| LogLine {
+			source,
+			..line(text)
+		};
+		sim.push(from(0, "sshd[42]: zero"));
+		sim.push(from(1, "[INFO] one: x"));
+		sim.push(from(2, "cron[7]: two"));
+		let mut texts: Vec<String> = sim
+			.rain()
+			.drops()
+			.iter()
+			.map(|drop| drop.text().iter().collect())
+			.collect();
+		texts.sort();
+		assert_eq!(texts, vec!["one: x", "sshd[42]: zero", "two"]);
 	}
 
 	#[test]

@@ -33,13 +33,15 @@ min_brightness = 0.3      # 0..1.0, lowest brightness of a visible trail cell; t
 strip_pattern = '^[^:]*:\s*'  # regex; its first match is removed from the text shown
                           # in the rain (here the "sshd[123]: " header). "" = off.
                           # The backlog, tail mode and rules keep the full line.
+                          # A [[source]] may set its own strip_pattern.
 
 [tail]
 backlog = 10000           # lines kept in memory (1..10000000)
 preload = 200             # lines read at startup per journald/file source (0..100000)
 
 # Sources. Each source may set `label = "name"` to prefix its lines with
-# "name: ". Without any [[source]] section, a single journald source is used.
+# "(name) ", and `strip_pattern` to replace rain.strip_pattern for its lines
+# ("" = off). Without any [[source]] section, a single journald source is used.
 
 [[source]]
 type = "journald"         # runs journalctl -f -o json

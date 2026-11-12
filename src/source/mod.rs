@@ -75,7 +75,7 @@ impl SourceContext {
 	/// Builds a sanitized line, prefixed with the label if there is one.
 	pub fn make_line(&self, ts: DateTime<Local>, raw: &str) -> LogLine {
 		let text = match &self.label {
-			Some(label) => sanitize(&format!("{label}: {raw}"), self.ascii_only),
+			Some(label) => sanitize(&format!("({label}) {raw}"), self.ascii_only),
 			None => sanitize(raw, self.ascii_only),
 		};
 		LogLine::new(ts, self.id, text)
