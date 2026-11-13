@@ -115,15 +115,16 @@ mod ffi {
 		ERROR_NO_MORE_ITEMS, ERROR_TIMEOUT, GetLastError, HANDLE, WAIT_FAILED,
 	};
 	use windows_sys::Win32::System::EventLog::{
-		EVT_HANDLE, EVT_VARIANT, EvtClose, EvtCreateBookmark, EvtCreateRenderContext,
-		EvtFormatMessage, EvtFormatMessageEvent, EvtNext, EvtOpenPublisherMetadata, EvtQuery,
-		EvtQueryChannelPath, EvtQueryReverseDirection, EvtRender, EvtRenderContextSystem,
-		EvtRenderContextUser, EvtRenderEventValues, EvtSubscribe, EvtSubscribeStartAfterBookmark,
-		EvtSubscribeStrict, EvtSubscribeToFutureEvents, EvtSystemChannel, EvtSystemEventID,
-		EvtSystemEventRecordId, EvtSystemLevel, EvtSystemProviderName, EvtSystemTimeCreated,
-		EvtUpdateBookmark, EvtVarTypeAnsiString, EvtVarTypeByte, EvtVarTypeFileTime,
-		EvtVarTypeHexInt32, EvtVarTypeHexInt64, EvtVarTypeInt16, EvtVarTypeInt32, EvtVarTypeInt64,
-		EvtVarTypeSByte, EvtVarTypeString, EvtVarTypeUInt16, EvtVarTypeUInt32, EvtVarTypeUInt64,
+		EVT_HANDLE, EVT_VARIANT, EVT_VARIANT_TYPE_ARRAY, EVT_VARIANT_TYPE_MASK, EvtClose,
+		EvtCreateBookmark, EvtCreateRenderContext, EvtFormatMessage, EvtFormatMessageEvent,
+		EvtNext, EvtOpenPublisherMetadata, EvtQuery, EvtQueryChannelPath, EvtQueryReverseDirection,
+		EvtRender, EvtRenderContextSystem, EvtRenderContextUser, EvtRenderEventValues,
+		EvtSubscribe, EvtSubscribeStartAfterBookmark, EvtSubscribeStrict,
+		EvtSubscribeToFutureEvents, EvtSystemChannel, EvtSystemEventID, EvtSystemEventRecordId,
+		EvtSystemLevel, EvtSystemProviderName, EvtSystemTimeCreated, EvtUpdateBookmark,
+		EvtVarTypeAnsiString, EvtVarTypeByte, EvtVarTypeFileTime, EvtVarTypeHexInt32,
+		EvtVarTypeHexInt64, EvtVarTypeInt16, EvtVarTypeInt32, EvtVarTypeInt64, EvtVarTypeSByte,
+		EvtVarTypeString, EvtVarTypeUInt16, EvtVarTypeUInt32, EvtVarTypeUInt64,
 	};
 	use windows_sys::Win32::System::Threading::{CreateEventW, ResetEvent, WaitForMultipleObjects};
 
@@ -278,7 +279,7 @@ mod ffi {
 
 		/// Renders the values of `context` for `event` into `self.values`
 		/// and returns how many there are.
-		fn render_values(&mut self, context: EVT_HANDLE, event: &EvtHandle) -> Option<usize> {
+		fn render_values(&mut self, context: EVT_HANDLE, event: &EvtHandle) -> io::Result<usize> {
 			loop {
 				let size = (self.values.len() * 8) as u32;
 				let mut used = 0u32;
@@ -295,13 +296,12 @@ mod ffi {
 					)
 				};
 				if ok != 0 {
-					return Some(count as usize);
+					return Ok(count as usize);
 				}
+				let code = unsafe { GetLastError() };
 				let needed = (used as usize).div_ceil(8);
-				if unsafe { GetLastError() } != ERROR_INSUFFICIENT_BUFFER
-					|| needed <= self.values.len()
-				{
-					return None;
+				if code != ERROR_INSUFFICIENT_BUFFER || needed <= self.values.len() {
+					return Err(io::Error::from_raw_os_error(code as i32));
 				}
 				self.values.resize(needed, 0);
 			}
@@ -317,7 +317,15 @@ mod ffi {
 				channel: channel.to_string(),
 				..EventRecord::default()
 			};
-			if let Some(count) = self.render_values(self.system.0, event) {
+			let count = match self.render_values(self.system.0, event) {
+				Ok(count) => count,
+				Err(error) => {
+					// Show why instead of an empty line.
+					record.message = Some(format!("(cannot read event: {error})"));
+					return record;
+				}
+			};
+			{
 				let values = self.variants(count);
 				let get = |id: i32| values.get(id as usize);
 				if let Some(text) = get(EvtSystemProviderName).and_then(variant_text) {
@@ -343,7 +351,7 @@ mod ffi {
 			}
 			record.message = self.format_message(event, &record.provider);
 			if record.message.is_none()
-				&& let Some(count) = self.render_values(self.user.0, event)
+				&& let Ok(count) = self.render_values(self.user.0, event)
 			{
 				record.data = self
 					.variants(count)
@@ -413,10 +421,10 @@ mod ffi {
 
 	fn variant_text(value: &EVT_VARIANT) -> Option<String> {
 		// Arrays are not shown.
-		if value.Count > 1 {
+		if value.Type & EVT_VARIANT_TYPE_ARRAY != 0 {
 			return None;
 		}
-		let kind = value.Type as i32;
+		let kind = (value.Type & EVT_VARIANT_TYPE_MASK) as i32;
 		unsafe {
 			match kind {
 				EvtVarTypeString => Some(from_wide_ptr(value.Anonymous.StringVal)),
@@ -440,7 +448,10 @@ mod ffi {
 	}
 
 	fn variant_u64(value: &EVT_VARIANT) -> Option<u64> {
-		let kind = value.Type as i32;
+		if value.Type & EVT_VARIANT_TYPE_ARRAY != 0 {
+			return None;
+		}
+		let kind = (value.Type & EVT_VARIANT_TYPE_MASK) as i32;
 		unsafe {
 			match kind {
 				EvtVarTypeByte => Some(value.Anonymous.ByteVal.into()),
