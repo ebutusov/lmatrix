@@ -77,13 +77,40 @@ pub fn format_line(record: &EventRecord) -> String {
 	)
 }
 
-/// Merges the backlogs of several channels: oldest first, at most the
-/// newest `count` entries.
-pub fn merge_backlog(per_channel: Vec<Vec<EventRecord>>, count: usize) -> Vec<EventRecord> {
-	let mut merged: Vec<EventRecord> = per_channel.into_iter().flatten().collect();
-	merged.sort_by_key(|record| (record.filetime, record.record_id));
-	let skip = merged.len().saturating_sub(count);
-	merged.split_off(skip)
+/// Several newest-first streams of backlog entries (one per channel),
+/// merged lazily by [`merge_newest`].
+pub trait NewestFirst {
+	type Item;
+	/// Sort key `(filetime, record_id)` of the next entry of `stream`, or
+	/// `None` when it has no more. Meant to be cheap.
+	fn peek_key(&mut self, stream: usize) -> Option<(u64, u64)>;
+	/// Removes the next entry of `stream` and returns it, fully prepared,
+	/// unless the source filter drops it.
+	fn take(&mut self, stream: usize) -> Option<Self::Item>;
+}
+
+/// The newest `count` kept entries across `stream_count` streams, oldest
+/// first. Entries are taken in time order, newest first, so only those
+/// that end up in the result (or are dropped by the filter) are prepared.
+pub fn merge_newest<S: NewestFirst>(
+	streams: &mut S,
+	stream_count: usize,
+	count: usize,
+) -> Vec<S::Item> {
+	let mut kept = Vec::new();
+	while kept.len() < count {
+		let newest = (0..stream_count)
+			.filter_map(|stream| streams.peek_key(stream).map(|key| (key, stream)))
+			.max_by_key(|&(key, _)| key);
+		let Some((_, stream)) = newest else {
+			break;
+		};
+		if let Some(item) = streams.take(stream) {
+			kept.push(item);
+		}
+	}
+	kept.reverse();
+	kept
 }
 
 /// Body of the source thread.
@@ -104,7 +131,7 @@ pub fn run(_channels: Vec<String>, context: SourceContext, _preload: usize) {
 // The Evt* constants keep their Win32 names, also in match patterns.
 #[allow(non_upper_case_globals)]
 mod ffi {
-	use std::collections::HashMap;
+	use std::collections::{HashMap, VecDeque};
 	use std::io;
 	use std::thread;
 	use std::time::{Duration, Instant};
@@ -130,7 +157,7 @@ mod ffi {
 
 	use chrono::Local;
 
-	use super::{EventRecord, filetime_to_local, format_line, merge_backlog};
+	use super::{EventRecord, NewestFirst, filetime_to_local, format_line, merge_newest};
 	use crate::source::SourceContext;
 
 	/// Pause before a broken subscription is opened again.
@@ -315,7 +342,16 @@ mod ffi {
 			unsafe { std::slice::from_raw_parts(self.values.as_ptr().cast(), count.min(available)) }
 		}
 
+		/// Fully renders an event: system fields, then message or data.
 		fn render(&mut self, event: &EvtHandle, channel: &str) -> EventRecord {
+			let mut record = self.render_system(event, channel);
+			self.complete(event, &mut record);
+			record
+		}
+
+		/// Renders only the system fields (cheap). When that fails, the
+		/// message says why.
+		fn render_system(&mut self, event: &EvtHandle, channel: &str) -> EventRecord {
 			let mut record = EventRecord {
 				channel: channel.to_string(),
 				..EventRecord::default()
@@ -352,6 +388,16 @@ mod ffi {
 					record.filetime = value;
 				}
 			}
+			record
+		}
+
+		/// Adds the message, or the data values when there is none: the
+		/// expensive part (publisher metadata, message formatting).
+		fn complete(&mut self, event: &EvtHandle, record: &mut EventRecord) {
+			if record.message.is_some() {
+				// render_system failed and already explains why.
+				return;
+			}
 			record.message = self.format_message(event, &record.provider);
 			if record.message.is_none()
 				&& let Ok(count) = self.render_values(self.user.0, event)
@@ -363,7 +409,6 @@ mod ffi {
 					.filter(|text| !text.trim().is_empty())
 					.collect();
 			}
-			record
 		}
 
 		/// The publisher's message for `event`. Text that comes back with a
@@ -477,6 +522,17 @@ mod ffi {
 		subscription: Option<EvtHandle>,
 		/// When a broken subscription is opened again.
 		retry_at: Option<Instant>,
+		/// The reverse backlog query while the backlog is read.
+		backlog: Option<BacklogReader>,
+	}
+
+	/// A reverse query over one channel: fetched events with only their
+	/// system fields rendered, newest first.
+	struct BacklogReader {
+		result_set: EvtHandle,
+		pending: VecDeque<(EvtHandle, EventRecord)>,
+		scanned: usize,
+		exhausted: bool,
 	}
 
 	impl Channel {
@@ -488,6 +544,7 @@ mod ffi {
 				bookmarked: false,
 				subscription: None,
 				retry_at: None,
+				backlog: None,
 			})
 		}
 
@@ -497,15 +554,8 @@ mod ffi {
 			}
 		}
 
-		/// Reads up to `count` of the newest entries, newest first, and
-		/// bookmarks the newest.
-		/// Entries the source filter drops do not count towards `count`.
-		fn read_backlog(
-			&mut self,
-			renderer: &mut Renderer,
-			context: &SourceContext,
-			count: usize,
-		) -> io::Result<Vec<EventRecord>> {
+		/// Starts the reverse backlog query.
+		fn open_backlog(&mut self) -> io::Result<()> {
 			let path = wide(&self.name);
 			let query = wide("*");
 			let result_set = EvtHandle::new(unsafe {
@@ -516,30 +566,53 @@ mod ffi {
 					EvtQueryChannelPath | EvtQueryReverseDirection,
 				)
 			})?;
-			let mut records = Vec::new();
-			let mut scanned = 0;
-			while records.len() < count && scanned < MAX_BACKLOG_SCAN {
-				let events = match next_batch(&result_set, INFINITE) {
-					Batch::Events(events) => events,
-					Batch::Empty => break,
-					Batch::Failed(error) => return Err(error),
-				};
-				for event in &events {
-					if records.len() >= count || scanned >= MAX_BACKLOG_SCAN {
-						break;
-					}
-					if scanned == 0 {
-						// The newest entry, kept or not: following starts after it.
-						self.mark(event);
-					}
-					scanned += 1;
-					let record = renderer.render(event, &self.name);
-					if context.accepts(&format_line(&record)) {
-						records.push(record);
-					}
-				}
+			self.backlog = Some(BacklogReader {
+				result_set,
+				pending: VecDeque::new(),
+				scanned: 0,
+				exhausted: false,
+			});
+			Ok(())
+		}
+
+		/// Makes sure the next backlog event (if any) is fetched. The newest
+		/// one is bookmarked as soon as it arrives, kept or not, so that
+		/// following starts right after the backlog.
+		fn fill_backlog(&mut self, renderer: &mut Renderer) -> io::Result<()> {
+			let Some(reader) = self.backlog.as_mut() else {
+				return Ok(());
+			};
+			if !reader.pending.is_empty() || reader.exhausted {
+				return Ok(());
 			}
-			Ok(records)
+			if reader.scanned >= MAX_BACKLOG_SCAN {
+				reader.exhausted = true;
+				return Ok(());
+			}
+			let events = match next_batch(&reader.result_set, INFINITE) {
+				Batch::Events(events) => events,
+				Batch::Empty => {
+					reader.exhausted = true;
+					return Ok(());
+				}
+				Batch::Failed(error) => {
+					reader.exhausted = true;
+					return Err(error);
+				}
+			};
+			let first_fetch = reader.scanned == 0;
+			reader.scanned += events.len();
+			if first_fetch
+				&& let Some(newest) = events.first()
+				&& unsafe { EvtUpdateBookmark(self.bookmark.0, newest.0) } != 0
+			{
+				self.bookmarked = true;
+			}
+			for event in events {
+				let record = renderer.render_system(&event, &self.name);
+				reader.pending.push_back((event, record));
+			}
+			Ok(())
 		}
 
 		/// Opens the subscription: right after the bookmark if there is one
@@ -630,6 +703,45 @@ mod ffi {
 		}
 	}
 
+	/// Adapts the channels' backlog readers to [`merge_newest`].
+	struct BacklogMerge<'a> {
+		channels: &'a mut [Channel],
+		renderer: &'a mut Renderer,
+		context: &'a SourceContext,
+		/// The main loop is gone.
+		gone: bool,
+	}
+
+	impl NewestFirst for BacklogMerge<'_> {
+		type Item = EventRecord;
+
+		fn peek_key(&mut self, stream: usize) -> Option<(u64, u64)> {
+			if self.gone {
+				return None;
+			}
+			let channel = &mut self.channels[stream];
+			if let Err(error) = channel.fill_backlog(self.renderer) {
+				// The backlog of this channel ends here; following continues.
+				let message = format!("eventlog {}: reading the backlog: {error}", channel.name);
+				if !self.context.report_error(&message) {
+					self.gone = true;
+					return None;
+				}
+			}
+			let (_, record) = channel.backlog.as_ref()?.pending.front()?;
+			Some((record.filetime, record.record_id))
+		}
+
+		fn take(&mut self, stream: usize) -> Option<EventRecord> {
+			let channel = &mut self.channels[stream];
+			let (event, mut record) = channel.backlog.as_mut()?.pending.pop_front()?;
+			self.renderer.complete(&event, &mut record);
+			self.context
+				.accepts(&format_line(&record))
+				.then_some(record)
+		}
+	}
+
 	pub fn run(channel_names: Vec<String>, context: SourceContext, preload: usize) {
 		let mut renderer = match Renderer::new() {
 			Ok(renderer) => renderer,
@@ -641,7 +753,6 @@ mod ffi {
 		};
 
 		let mut channels = Vec::new();
-		let mut backlogs = Vec::new();
 		for name in channel_names {
 			let mut channel = match Channel::new(name.clone()) {
 				Ok(channel) => channel,
@@ -652,21 +763,34 @@ mod ffi {
 					continue;
 				}
 			};
-			if preload > 0 {
-				match channel.read_backlog(&mut renderer, &context, preload) {
-					Ok(records) => backlogs.push(records),
-					Err(error) => {
-						if !context.report_error(&format!("eventlog {name}: {error}")) {
-							return;
-						}
-						continue;
-					}
+			if preload > 0
+				&& let Err(error) = channel.open_backlog()
+			{
+				// Missing or unreadable: following would fail the same way.
+				if !context.report_error(&format!("eventlog {name}: {error}")) {
+					return;
 				}
+				continue;
 			}
 			channels.push(channel);
 		}
 
-		for record in merge_backlog(backlogs, preload) {
+		let channel_count = channels.len();
+		let mut merge = BacklogMerge {
+			channels: &mut channels,
+			renderer: &mut renderer,
+			context: &context,
+			gone: false,
+		};
+		let backlog = merge_newest(&mut merge, channel_count, preload);
+		if merge.gone {
+			return;
+		}
+		for channel in &mut channels {
+			// Closes the queries and the events fetched but not used.
+			channel.backlog = None;
+		}
+		for record in backlog {
 			if !send_record(&context, &record, true) {
 				return;
 			}
@@ -837,23 +961,60 @@ mod tests {
 		);
 	}
 
+	/// Streams of `(filetime, keep)` entries, newest first; counts how many
+	/// entries were prepared.
+	struct FakeStreams {
+		streams: Vec<Vec<(u64, bool)>>,
+		taken: usize,
+	}
+
+	impl NewestFirst for FakeStreams {
+		type Item = u64;
+
+		fn peek_key(&mut self, stream: usize) -> Option<(u64, u64)> {
+			self.streams[stream].first().map(|&(time, _)| (time, 0))
+		}
+
+		fn take(&mut self, stream: usize) -> Option<u64> {
+			self.taken += 1;
+			let (time, keep) = self.streams[stream].remove(0);
+			keep.then_some(time)
+		}
+	}
+
 	#[test]
-	fn backlog_merge_keeps_newest_in_order() {
-		let system = vec![record("System", 30, 3), record("System", 10, 1)];
-		let application = vec![record("Application", 20, 9), record("Application", 5, 8)];
-		let merged = merge_backlog(vec![system, application], 3);
-		let order: Vec<(String, u64)> = merged
-			.iter()
-			.map(|event| (event.channel.clone(), event.filetime))
-			.collect();
-		assert_eq!(
-			order,
-			vec![
-				("System".to_string(), 10),
-				("Application".to_string(), 20),
-				("System".to_string(), 30)
-			]
-		);
-		assert!(merge_backlog(Vec::new(), 5).is_empty());
+	fn merge_takes_only_what_it_needs() {
+		let mut streams = FakeStreams {
+			streams: vec![
+				vec![(30, true), (10, true), (1, true)],
+				vec![(20, true), (5, true), (2, true)],
+			],
+			taken: 0,
+		};
+		assert_eq!(merge_newest(&mut streams, 2, 3), vec![10, 20, 30]);
+		assert_eq!(streams.taken, 3);
+	}
+
+	#[test]
+	fn merge_skips_dropped_entries() {
+		let mut streams = FakeStreams {
+			streams: vec![
+				vec![(50, false), (40, false), (30, true)],
+				vec![(45, false), (20, true), (10, true)],
+			],
+			taken: 0,
+		};
+		assert_eq!(merge_newest(&mut streams, 2, 2), vec![20, 30]);
+		assert_eq!(streams.taken, 5);
+	}
+
+	#[test]
+	fn merge_ends_when_streams_run_dry() {
+		let mut streams = FakeStreams {
+			streams: vec![vec![(3, true)], Vec::new()],
+			taken: 0,
+		};
+		assert_eq!(merge_newest(&mut streams, 2, 10), vec![3]);
+		assert!(merge_newest(&mut streams, 0, 10).is_empty());
 	}
 }
