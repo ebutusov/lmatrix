@@ -41,13 +41,17 @@ preload = 200             # lines read at startup per journald/eventlog/file sou
 
 # Sources. Each source may set `label = "name"` to prefix its lines with
 # "(name) ", and `strip_pattern` to replace rain.strip_pattern for its lines
-# ("" = off). Without any [[source]] section, a single journald source is used
-# (on Windows: an eventlog source for System and Application).
+# ("" = off). `include` / `exclude` are regexes that keep only matching lines
+# / drop matching lines (tested without the label; errors from lmatrix itself
+# are never dropped). Without any [[source]] section, a single journald source
+# is used (on Windows: an eventlog source for System and Application).
 
 [[source]]
 type = "journald"         # runs journalctl -f -o json
 units = []                # e.g. ["ssh.service", "nginx.service"]; empty = everything
 # label = "sys"
+# include = '(?i)error|fail'  # keep only matching lines
+# exclude = 'CRON\['         # drop matching lines
 # host = "admin@web1"     # read this host's journal over ssh (required on Windows)
 # ssh_args = ["-C"]       # extra ssh arguments, e.g. ["-C", "-p", "2222"]
 

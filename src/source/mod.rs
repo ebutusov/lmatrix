@@ -13,7 +13,9 @@ use std::thread;
 
 use chrono::{DateTime, Local};
 
-use crate::config::SourceConfig;
+use regex::Regex;
+
+use crate::config::{SourceConfig, SourceFilter};
 use crate::line::{LogLine, SourceId, SourceMsg, sanitize};
 
 pub use process::{ChildGroup, GroupChild, terminate_children};
@@ -75,31 +77,79 @@ pub struct SourceContext {
 	pub id: SourceId,
 	pub label: Option<String>,
 	pub ascii_only: bool,
+	pub filter: LineFilter,
 	pub sender: SyncSender<SourceMsg>,
+}
+
+/// Compiled `include` / `exclude` regexes of a source.
+#[derive(Debug, Clone, Default)]
+pub struct LineFilter {
+	pub include: Option<Regex>,
+	pub exclude: Option<Regex>,
+}
+
+impl LineFilter {
+	/// Compiles a validated [`SourceFilter`].
+	pub fn new(config: &SourceFilter) -> Self {
+		let compile = |pattern: &Option<String>| {
+			pattern
+				.as_deref()
+				.map(|pattern| Regex::new(pattern).expect("validated"))
+		};
+		Self {
+			include: compile(&config.include),
+			exclude: compile(&config.exclude),
+		}
+	}
+
+	/// Whether a line with this (sanitized, unlabeled) text is kept.
+	pub fn accepts(&self, text: &str) -> bool {
+		self.include
+			.as_ref()
+			.is_none_or(|regex| regex.is_match(text))
+			&& !self
+				.exclude
+				.as_ref()
+				.is_some_and(|regex| regex.is_match(text))
+	}
 }
 
 impl SourceContext {
 	/// Builds a sanitized line, prefixed with the label if there is one.
-	pub fn make_line(&self, ts: DateTime<Local>, raw: &str) -> LogLine {
+	/// `None` when the source's filter drops it.
+	pub fn make_line(&self, ts: DateTime<Local>, raw: &str) -> Option<LogLine> {
+		let text = sanitize(raw, self.ascii_only);
+		if !self.filter.accepts(&text) {
+			return None;
+		}
 		let text = match &self.label {
-			Some(label) => sanitize(&format!("({label}) {raw}"), self.ascii_only),
-			None => sanitize(raw, self.ascii_only),
+			Some(label) => sanitize(&format!("({label}) {text}"), self.ascii_only),
+			None => text,
 		};
-		LogLine::new(ts, self.id, text)
+		Some(LogLine::new(ts, self.id, text))
 	}
 
-	/// Sends a live line. Returns `false` once the main loop is gone.
+	/// Whether the source's filter keeps a line with this raw text.
+	pub fn accepts(&self, raw: &str) -> bool {
+		self.filter.accepts(&sanitize(raw, self.ascii_only))
+	}
+
+	/// Sends a live line, unless the filter drops it. Returns `false` once
+	/// the main loop is gone.
 	pub fn send_live(&self, ts: DateTime<Local>, raw: &str) -> bool {
-		self.sender
-			.send(SourceMsg::Live(self.make_line(ts, raw)))
-			.is_ok()
+		match self.make_line(ts, raw) {
+			Some(line) => self.sender.send(SourceMsg::Live(line)).is_ok(),
+			None => true,
+		}
 	}
 
-	/// Sends a preloaded line. Returns `false` once the main loop is gone.
+	/// Sends a preloaded line, unless the filter drops it. Returns `false`
+	/// once the main loop is gone.
 	pub fn send_preload(&self, ts: DateTime<Local>, raw: &str) -> bool {
-		self.sender
-			.send(SourceMsg::Preload(self.make_line(ts, raw)))
-			.is_ok()
+		match self.make_line(ts, raw) {
+			Some(line) => self.sender.send(SourceMsg::Preload(line)).is_ok(),
+			None => true,
+		}
 	}
 
 	/// Signals that this source has sent all its preload lines.
@@ -108,6 +158,7 @@ impl SourceContext {
 	}
 
 	/// Reports a source problem as an ordinary line `lmatrix: <description>`.
+	/// Never filtered.
 	pub fn report_error(&self, description: &str) -> bool {
 		let text = sanitize(&format!("lmatrix: {description}"), self.ascii_only);
 		self.sender
@@ -158,6 +209,81 @@ pub fn for_each_line<R: BufRead>(
 #[cfg(test)]
 mod tests {
 	use super::*;
+	use std::sync::mpsc;
+
+	fn context_with(
+		label: Option<&str>,
+		include: Option<&str>,
+		exclude: Option<&str>,
+	) -> (SourceContext, mpsc::Receiver<SourceMsg>) {
+		let (sender, receiver) = mpsc::sync_channel(16);
+		let filter = LineFilter::new(&SourceFilter {
+			include: include.map(str::to_string),
+			exclude: exclude.map(str::to_string),
+		});
+		let context = SourceContext {
+			id: 0,
+			label: label.map(str::to_string),
+			ascii_only: false,
+			filter,
+			sender,
+		};
+		(context, receiver)
+	}
+
+	fn texts(receiver: mpsc::Receiver<SourceMsg>) -> Vec<String> {
+		receiver
+			.iter()
+			.map(|message| match message {
+				SourceMsg::Live(line) | SourceMsg::Preload(line) => line.text.to_string(),
+				SourceMsg::PreloadDone(_) => "done".to_string(),
+			})
+			.collect()
+	}
+
+	#[test]
+	fn exclude_drops_matching_lines_but_not_errors() {
+		let (context, receiver) = context_with(
+			Some("lc"),
+			None,
+			Some("^Application Information SynTPEnhService\\["),
+		);
+		let now = Local::now();
+		assert!(context.send_live(
+			now,
+			"Application Information SynTPEnhService[0]: (no message)"
+		));
+		assert!(context.send_preload(now, "Application Error disk[7]: bad block"));
+		assert!(context.report_error("SynTPEnhService is noisy"));
+		assert!(!context.accepts("Application Information SynTPEnhService[0]: x"));
+		drop(context);
+		assert_eq!(
+			texts(receiver),
+			vec![
+				"(lc) Application Error disk[7]: bad block",
+				"lmatrix: SynTPEnhService is noisy"
+			]
+		);
+	}
+
+	#[test]
+	fn include_keeps_only_matching_lines() {
+		let (context, receiver) = context_with(None, Some("(?i)error|warning"), Some("ignored"));
+		let now = Local::now();
+		for text in ["an Error here", "fine", "warning: x", "error, ignored"] {
+			assert!(context.send_live(now, text));
+		}
+		drop(context);
+		assert_eq!(texts(receiver), vec!["an Error here", "warning: x"]);
+	}
+
+	#[test]
+	fn filter_sees_sanitized_text() {
+		let (context, receiver) = context_with(None, Some("^red alert$"), None);
+		assert!(context.send_live(Local::now(), "\x1b[31mred alert\x1b[0m"));
+		drop(context);
+		assert_eq!(texts(receiver), vec!["red alert"]);
+	}
 
 	#[test]
 	fn splits_lines_and_strips_carriage_returns() {

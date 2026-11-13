@@ -211,6 +211,7 @@ Each source runs in its own thread and sends lines over a bounded channel (capac
 ### 6.5 Labels and failures **(assumption)**
 
 - A source may have an optional `label`; when set, each of its lines is prefixed with `(label) `.
+- A source may have `include` and `exclude` regexes (non-empty, validated at startup). A line is kept when it matches `include` (if set) and does not match `exclude` (if set). Matching runs in the source thread, on the sanitized text before the label is added. Dropped lines are never sent, so they do not reach the backlog, rules or rain. `lmatrix: …` error lines are never filtered. The `eventlog` backlog applies the filter while reading, so dropped events do not count towards `preload` (at most 100000 events are scanned per channel). Other sources filter after their preload has been read.
 - Source errors (child process fails to start, `journalctl` reports a permission problem, a file disappears) are reported as ordinary lines with the text `lmatrix: <description>`, so they show up in the backlog and can be matched by rules. A failing source never terminates the app.
 - All child processes are terminated when the app exits.
 
@@ -334,6 +335,8 @@ preload = 200             # lines read at startup per journald/eventlog/file sou
 type = "journald"
 units = []                # empty = everything
 # label = "sys"
+# include = '(?i)error'   # keep only matching lines
+# exclude = 'CRON\['     # drop matching lines
 
 [[source]]
 type = "file"
@@ -482,7 +485,7 @@ Commit after each milestone. Each must build without warnings, pass `cargo clipp
 
 - **Sanitizing:** escape sequences, control characters, tabs, wide characters, over-long lines.
 - **Rules:** first match wins; all three hold forms parse; invalid regex is rejected with the rule's name.
-- **Config:** defaults (per platform); each validation error, including eventlog `channels`; unknown keys rejected; platform checks (local journald on Windows, eventlog elsewhere).
+- **Config:** defaults (per platform); each validation error, including eventlog `channels` and source `include`/`exclude`; unknown keys rejected; platform checks (local journald on Windows, eventlog elsewhere).
 - **Eventlog formatting:** FILETIME conversion, level names, line text with flattened messages and the data fallback, backlog merge order. On Windows, a real backlog read of `Application`.
 - **Backlog:** capacity and discard order.
 - **Sim, with a fixed seed:**

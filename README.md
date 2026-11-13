@@ -158,6 +158,29 @@ line, label included. Without any `[[source]]` section, a single journald
 source is used (an eventlog source on Windows).
 Write `source = []` to run with no sources at all.
 
+A source may also filter its lines with two regexes (Rust syntax, add
+`(?i)` to ignore case):
+
+- `include`: keep only lines that match.
+- `exclude`: drop lines that match. When both are set, a line must match
+  `include` and must not match `exclude`.
+
+The filter sees the line text without the label. Dropped lines never reach
+the backlog, tail mode, rules or rain. lmatrix's own `lmatrix: …` error
+lines are never filtered. For `eventlog` sources, dropped events do not
+count towards `preload`. For `journald` and `file` sources the preload is
+read first and filtered afterwards, so it can show fewer lines.
+
+```toml
+[[source]]
+type = "eventlog"
+exclude = '^Application Information SynTPEnhService\['   # a touchpad driver's 5 s heartbeat
+
+[[source]]
+type = "journald"
+include = '(?i)error|fail|denied'
+```
+
 ```toml
 [[source]]
 type = "journald"          # runs journalctl -f -o json -n <preload>

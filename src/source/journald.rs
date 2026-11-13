@@ -450,6 +450,7 @@ fn follow(
 mod tests {
 	use super::*;
 	use crate::line::SourceMsg;
+	use crate::source::LineFilter;
 	use chrono::TimeZone;
 
 	#[test]
@@ -519,6 +520,7 @@ mod tests {
 			id: 1,
 			label: None,
 			ascii_only: false,
+			filter: LineFilter::default(),
 			sender,
 		};
 		let start = Local::now();
@@ -547,6 +549,7 @@ mod tests {
 			id: 0,
 			label: None,
 			ascii_only: false,
+			filter: LineFilter::default(),
 			sender,
 		};
 		let start = Local::now();
@@ -643,6 +646,7 @@ mod tests {
 			id: 0,
 			label: None,
 			ascii_only: false,
+			filter: LineFilter::default(),
 			sender,
 		};
 		thread::spawn(move || run(Vec::new(), None, context, 3));

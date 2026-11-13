@@ -131,6 +131,7 @@ fn run_once(run: &str, context: &SourceContext) -> RunOutcome {
 mod tests {
 	use super::*;
 	use crate::line::SourceMsg;
+	use crate::source::LineFilter;
 	use std::sync::mpsc;
 	use std::time::Instant;
 
@@ -176,6 +177,7 @@ mod tests {
 			id: 3,
 			label: Some("cmd".into()),
 			ascii_only: false,
+			filter: LineFilter::default(),
 			sender,
 		};
 		let settings = CommandSettings {
@@ -209,6 +211,7 @@ mod tests {
 			id: 0,
 			label: None,
 			ascii_only: false,
+			filter: LineFilter::default(),
 			sender,
 		};
 		let settings = CommandSettings {

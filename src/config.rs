@@ -65,11 +65,13 @@ pub enum SourceConfig {
 		remote: Option<RemoteHost>,
 		label: Option<String>,
 		strip_pattern: Option<String>,
+		filter: SourceFilter,
 	},
 	File {
 		path: String,
 		label: Option<String>,
 		strip_pattern: Option<String>,
+		filter: SourceFilter,
 	},
 	Command {
 		run: String,
@@ -77,13 +79,24 @@ pub enum SourceConfig {
 		restart_delay: Duration,
 		label: Option<String>,
 		strip_pattern: Option<String>,
+		filter: SourceFilter,
 	},
 	/// Windows event log channels, read through the Evt* API.
 	Eventlog {
 		channels: Vec<String>,
 		label: Option<String>,
 		strip_pattern: Option<String>,
+		filter: SourceFilter,
 	},
+}
+
+/// Per-source line filter: regexes tested against each line's text,
+/// without the label. A line is kept when it matches `include` (if set)
+/// and does not match `exclude` (if set).
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct SourceFilter {
+	pub include: Option<String>,
+	pub exclude: Option<String>,
 }
 
 /// Default `channels` of an eventlog source.
@@ -100,6 +113,15 @@ impl SourceConfig {
 			| SourceConfig::File { label, .. }
 			| SourceConfig::Command { label, .. }
 			| SourceConfig::Eventlog { label, .. } => label.as_deref(),
+		}
+	}
+
+	pub fn filter(&self) -> &SourceFilter {
+		match self {
+			SourceConfig::Journald { filter, .. }
+			| SourceConfig::File { filter, .. }
+			| SourceConfig::Command { filter, .. }
+			| SourceConfig::Eventlog { filter, .. } => filter,
 		}
 	}
 
@@ -120,6 +142,7 @@ impl SourceConfig {
 			remote: None,
 			label: None,
 			strip_pattern: None,
+			filter: SourceFilter::default(),
 		}
 	}
 
@@ -131,6 +154,7 @@ impl SourceConfig {
 				.collect(),
 			label: None,
 			strip_pattern: None,
+			filter: SourceFilter::default(),
 		}
 	}
 
@@ -370,11 +394,15 @@ enum RawSource {
 		ssh_args: Option<Vec<String>>,
 		label: Option<String>,
 		strip_pattern: Option<String>,
+		include: Option<String>,
+		exclude: Option<String>,
 	},
 	File {
 		path: String,
 		label: Option<String>,
 		strip_pattern: Option<String>,
+		include: Option<String>,
+		exclude: Option<String>,
 	},
 	Command {
 		run: String,
@@ -382,11 +410,15 @@ enum RawSource {
 		restart_delay: Option<String>,
 		label: Option<String>,
 		strip_pattern: Option<String>,
+		include: Option<String>,
+		exclude: Option<String>,
 	},
 	Eventlog {
 		channels: Option<Vec<String>>,
 		label: Option<String>,
 		strip_pattern: Option<String>,
+		include: Option<String>,
+		exclude: Option<String>,
 	},
 }
 
@@ -422,6 +454,24 @@ fn check_remote(
 		bail!("{key}.ssh_args: arguments must not be empty");
 	}
 	Ok(Some(RemoteHost { host, ssh_args }))
+}
+
+/// Validates the `include` and `exclude` keys of a source.
+fn check_filter(
+	key: &str,
+	include: Option<String>,
+	exclude: Option<String>,
+) -> Result<SourceFilter> {
+	for (name, pattern) in [("include", &include), ("exclude", &exclude)] {
+		if let Some(text) = pattern {
+			if text.is_empty() {
+				bail!("{key}.{name}: must not be empty (leave the key out instead)");
+			}
+			regex::Regex::new(text)
+				.map_err(|error| anyhow!("{key}.{name}: invalid regex: {error}"))?;
+		}
+	}
+	Ok(SourceFilter { include, exclude })
 }
 
 /// Validates the `channels` key of an eventlog source.
@@ -632,6 +682,8 @@ impl RawConfig {
 							ssh_args,
 							label,
 							strip_pattern,
+							include,
+							exclude,
 						} => {
 							if units.iter().any(|unit| unit.trim().is_empty()) {
 								bail!("{key}.units: unit names must not be empty");
@@ -644,12 +696,15 @@ impl RawConfig {
 									&format!("{key}.strip_pattern"),
 									strip_pattern,
 								)?,
+								filter: check_filter(&key, include, exclude)?,
 							}
 						}
 						RawSource::File {
 							path,
 							label,
 							strip_pattern,
+							include,
+							exclude,
 						} => {
 							if path.trim().is_empty() {
 								bail!("{key}.path: must not be empty");
@@ -664,6 +719,7 @@ impl RawConfig {
 									&format!("{key}.strip_pattern"),
 									strip_pattern,
 								)?,
+								filter: check_filter(&key, include, exclude)?,
 							}
 						}
 						RawSource::Command {
@@ -672,6 +728,8 @@ impl RawConfig {
 							restart_delay,
 							label,
 							strip_pattern,
+							include,
+							exclude,
 						} => {
 							if run.trim().is_empty() {
 								bail!("{key}.run: must not be empty");
@@ -694,12 +752,15 @@ impl RawConfig {
 									&format!("{key}.strip_pattern"),
 									strip_pattern,
 								)?,
+								filter: check_filter(&key, include, exclude)?,
 							}
 						}
 						RawSource::Eventlog {
 							channels,
 							label,
 							strip_pattern,
+							include,
+							exclude,
 						} => SourceConfig::Eventlog {
 							channels: check_channels(&format!("{key}.channels"), channels)?,
 							label: check_label(&format!("{key}.label"), label)?,
@@ -707,6 +768,7 @@ impl RawConfig {
 								&format!("{key}.strip_pattern"),
 								strip_pattern,
 							)?,
+							filter: check_filter(&key, include, exclude)?,
 						},
 					});
 				}
@@ -764,6 +826,7 @@ mod tests {
 				channels: vec!["System".into(), "Application".into()],
 				label: None,
 				strip_pattern: None,
+				filter: SourceFilter::default(),
 			}
 		} else {
 			SourceConfig::default_journald()
@@ -865,6 +928,7 @@ color = "#3cc8ff"
 				restart_delay: Duration::from_secs(2),
 				label: None,
 				strip_pattern: None,
+				filter: SourceFilter::default(),
 			}
 		);
 		assert_eq!(config.sources[0].label(), Some("sys"));
@@ -885,6 +949,7 @@ color = "#3cc8ff"
 				restart_delay: Duration::from_secs(5),
 				label: None,
 				strip_pattern: None,
+				filter: SourceFilter::default(),
 			}
 		);
 	}
@@ -911,6 +976,7 @@ units = ["nginx.service"]
 				}),
 				label: None,
 				strip_pattern: None,
+				filter: SourceFilter::default(),
 			}]
 		);
 	}
@@ -974,6 +1040,7 @@ label = "ps"
 				channels: vec!["Microsoft-Windows-PowerShell/Operational".into()],
 				label: Some("ps".into()),
 				strip_pattern: None,
+				filter: SourceFilter::default(),
 			}]
 		);
 		assert_eq!(custom.sources[0].label(), Some("ps"));
@@ -1119,6 +1186,48 @@ strip_pattern = ""
 		assert_eq!(patterns, vec![Some(r"^\S+ "), Some(r"^\[\w+\] "), None]);
 		let error = error_of("[[source]]\ntype = \"file\"\npath = \"/a\"\nstrip_pattern = \"(\"\n");
 		assert!(error.contains("source[0].strip_pattern"), "{error}");
+	}
+
+	#[test]
+	fn source_filters() {
+		let config = Config::parse(
+			r#"
+[[source]]
+type = "eventlog"
+exclude = '^Application Information SynTPEnhService\['
+
+[[source]]
+type = "file"
+path = "/a.log"
+include = "(?i)error"
+exclude = "harmless"
+
+[[source]]
+type = "command"
+run = "yes"
+"#,
+		)
+		.unwrap();
+		assert_eq!(
+			config.sources[0].filter(),
+			&SourceFilter {
+				include: None,
+				exclude: Some(r"^Application Information SynTPEnhService\[".into()),
+			}
+		);
+		assert_eq!(
+			config.sources[1].filter(),
+			&SourceFilter {
+				include: Some("(?i)error".into()),
+				exclude: Some("harmless".into()),
+			}
+		);
+		assert_eq!(config.sources[2].filter(), &SourceFilter::default());
+
+		let source = |keys: &str| error_of(&format!("[[source]]\ntype = \"journald\"\n{keys}\n"));
+		assert!(source(r#"exclude = "(""#).contains("source[0].exclude: invalid regex"));
+		assert!(source(r#"include = "[""#).contains("source[0].include: invalid regex"));
+		assert!(source(r#"include = """#).contains("source[0].include: must not be empty"));
 	}
 
 	#[test]

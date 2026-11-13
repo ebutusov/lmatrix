@@ -138,6 +138,9 @@ mod ffi {
 	/// Longest wait for a signal; on every wake all channels are drained,
 	/// so a missed signal delays an entry by at most this long.
 	const WAIT_TIMEOUT_MS: u32 = 1000;
+	/// Most events looked at per channel for the backlog, so a filter that
+	/// drops nearly everything does not read a huge log to its start.
+	const MAX_BACKLOG_SCAN: usize = 100_000;
 	/// Events fetched per `EvtNext` call.
 	const BATCH: usize = 64;
 	/// `EvtNext` timeout for queries: wait until the batch is ready.
@@ -496,9 +499,11 @@ mod ffi {
 
 		/// Reads up to `count` of the newest entries, newest first, and
 		/// bookmarks the newest.
+		/// Entries the source filter drops do not count towards `count`.
 		fn read_backlog(
 			&mut self,
 			renderer: &mut Renderer,
+			context: &SourceContext,
 			count: usize,
 		) -> io::Result<Vec<EventRecord>> {
 			let path = wide(&self.name);
@@ -512,17 +517,26 @@ mod ffi {
 				)
 			})?;
 			let mut records = Vec::new();
-			while records.len() < count {
+			let mut scanned = 0;
+			while records.len() < count && scanned < MAX_BACKLOG_SCAN {
 				let events = match next_batch(&result_set, INFINITE) {
 					Batch::Events(events) => events,
 					Batch::Empty => break,
 					Batch::Failed(error) => return Err(error),
 				};
-				for event in events.iter().take(count - records.len()) {
-					if records.is_empty() {
+				for event in &events {
+					if records.len() >= count || scanned >= MAX_BACKLOG_SCAN {
+						break;
+					}
+					if scanned == 0 {
+						// The newest entry, kept or not: following starts after it.
 						self.mark(event);
 					}
-					records.push(renderer.render(event, &self.name));
+					scanned += 1;
+					let record = renderer.render(event, &self.name);
+					if context.accepts(&format_line(&record)) {
+						records.push(record);
+					}
 				}
 			}
 			Ok(records)
@@ -639,7 +653,7 @@ mod ffi {
 				}
 			};
 			if preload > 0 {
-				match channel.read_backlog(&mut renderer, preload) {
+				match channel.read_backlog(&mut renderer, &context, preload) {
 					Ok(records) => backlogs.push(records),
 					Err(error) => {
 						if !context.report_error(&format!("eventlog {name}: {error}")) {
@@ -709,6 +723,7 @@ mod ffi {
 
 		use super::*;
 		use crate::line::SourceMsg;
+		use crate::source::LineFilter;
 
 		#[test]
 		fn reads_application_backlog() {
@@ -717,6 +732,7 @@ mod ffi {
 				id: 0,
 				label: None,
 				ascii_only: false,
+				filter: LineFilter::default(),
 				sender,
 			};
 			thread::spawn(move || run(vec!["Application".into()], context, 3));
