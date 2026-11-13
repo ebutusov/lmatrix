@@ -111,8 +111,8 @@ mod ffi {
 
 	use windows_sys::Win32::Foundation::{
 		CloseHandle, ERROR_EVT_MAX_INSERTS_REACHED, ERROR_EVT_UNRESOLVED_PARAMETER_INSERT,
-		ERROR_EVT_UNRESOLVED_VALUE_INSERT, ERROR_INSUFFICIENT_BUFFER, ERROR_NO_MORE_ITEMS,
-		ERROR_TIMEOUT, GetLastError, HANDLE, WAIT_FAILED,
+		ERROR_EVT_UNRESOLVED_VALUE_INSERT, ERROR_INSUFFICIENT_BUFFER, ERROR_INVALID_OPERATION,
+		ERROR_NO_MORE_ITEMS, ERROR_TIMEOUT, GetLastError, HANDLE, WAIT_FAILED,
 	};
 	use windows_sys::Win32::System::EventLog::{
 		EVT_HANDLE, EVT_VARIANT, EvtClose, EvtCreateBookmark, EvtCreateRenderContext,
@@ -228,7 +228,13 @@ mod ffi {
 		};
 		if ok == 0 {
 			let code = unsafe { GetLastError() };
-			return if code == ERROR_NO_MORE_ITEMS || code == ERROR_TIMEOUT {
+			// A pull subscription with nothing pending fails with
+			// ERROR_INVALID_OPERATION (undocumented; winlogbeat handles it
+			// the same way).
+			let nothing_pending = code == ERROR_NO_MORE_ITEMS
+				|| code == ERROR_TIMEOUT
+				|| (code == ERROR_INVALID_OPERATION && returned == 0);
+			return if nothing_pending {
 				Batch::Empty
 			} else {
 				Batch::Failed(io::Error::from_raw_os_error(code as i32))
@@ -714,6 +720,18 @@ mod ffi {
 			assert!(preload_lines.len() <= 3, "{preload_lines:#?}");
 			for line in &preload_lines {
 				assert!(line.starts_with("Application "), "{line}");
+			}
+			// The subscription must survive empty reads: no error lines
+			// for a few wakes of the follow loop.
+			let deadline = std::time::Instant::now() + Duration::from_secs(3);
+			while let Some(left) = deadline.checked_duration_since(std::time::Instant::now()) {
+				match receiver.recv_timeout(left) {
+					Ok(SourceMsg::Live(line)) => {
+						assert!(!line.text.starts_with("lmatrix:"), "{}", line.text)
+					}
+					Ok(_) => {}
+					Err(_) => break,
+				}
 			}
 		}
 	}
