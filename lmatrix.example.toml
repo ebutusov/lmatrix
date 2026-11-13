@@ -37,16 +37,21 @@ strip_pattern = '^[^:]*:\s*'  # regex; its first match is removed from the text 
 
 [tail]
 backlog = 10000           # lines kept in memory (1..10000000)
-preload = 200             # lines read at startup per journald/file source (0..100000)
+preload = 200             # lines read at startup per journald/eventlog/file source (0..100000)
 
 # Sources. Each source may set `label = "name"` to prefix its lines with
 # "(name) ", and `strip_pattern` to replace rain.strip_pattern for its lines
-# ("" = off). Without any [[source]] section, a single journald source is used.
+# ("" = off). `include` / `exclude` are regexes that keep only matching lines
+# / drop matching lines (tested without the label; errors from lmatrix itself
+# are never dropped). Without any [[source]] section, a single journald source
+# is used (on Windows: an eventlog source for System and Application).
 
 [[source]]
 type = "journald"         # runs journalctl -f -o json
 units = []                # e.g. ["ssh.service", "nginx.service"]; empty = everything
 # label = "sys"
+# include = '(?i)error|fail'  # keep only matching lines
+# exclude = 'CRON\['         # drop matching lines
 # host = "admin@web1"     # read this host's journal over ssh (required on Windows)
 # ssh_args = ["-C"]       # extra ssh arguments, e.g. ["-C", "-p", "2222"]
 
@@ -59,6 +64,10 @@ units = []                # e.g. ["ssh.service", "nginx.service"]; empty = every
 # run = "docker logs -f web"      # run through sh -c (PowerShell on Windows)
 # restart = true                  # start again when it exits
 # restart_delay = "5s"            # at least 100ms
+
+# [[source]]
+# type = "eventlog"               # Windows only: the local Windows event log
+# channels = ["System", "Application"]   # 1..64 channel names
 
 # Rules, tested in order; the first match wins. `pattern` uses Rust regex
 # syntax and is case-sensitive unless it starts with (?i).

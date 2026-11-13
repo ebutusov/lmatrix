@@ -11,7 +11,7 @@ use fastrand::Rng;
 use lmatrix::config::{self, ColorChoice, Config};
 use lmatrix::rules::RuleSet;
 use lmatrix::sim::Sim;
-use lmatrix::source::{self, CHANNEL_CAPACITY, SourceContext};
+use lmatrix::source::{self, CHANNEL_CAPACITY, LineFilter, SourceContext};
 use lmatrix::term::{self, ColorMode, TerminalGuard};
 use lmatrix::ui::{self, UiOptions};
 
@@ -123,6 +123,7 @@ fn run(args: Args) -> Result<ExitCode> {
 			id: 0,
 			label: None,
 			ascii_only,
+			filter: LineFilter::default(),
 			sender,
 		});
 		1
@@ -132,6 +133,7 @@ fn run(args: Args) -> Result<ExitCode> {
 				id,
 				label: source_config.label().map(str::to_string),
 				ascii_only,
+				filter: LineFilter::new(source_config.filter()),
 				sender: sender.clone(),
 			};
 			source::spawn(source_config, context, config.tail.preload);
