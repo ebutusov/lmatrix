@@ -11,7 +11,7 @@ This document is the complete implementation brief. Where it gives a number, tha
 ### Goals
 
 - Single binary, `lmatrix`, for a single Linux host, or for one or more remote hosts whose journals are read over ssh (see 6.1).
-- Also builds for Windows, to run in Windows Terminal against remote journals (see 6.6).
+- Also builds for Windows, to run in Windows Terminal against remote journals and the local Windows event log (see 6.6, 6.7).
 - Runs in terminal emulators, typically over SSH: Windows Terminal, PuTTY, and inside tmux must all work.
 - Sources, rules and visual parameters come from a TOML config file.
 - Looks like classic Matrix rain at all times, on a busy host and on an idle one.
@@ -178,7 +178,7 @@ Lines loaded at startup (section 6.4) are stored with their matching rule so the
 
 ## 6. Sources
 
-Each source runs in its own thread and sends lines over a bounded channel (capacity 8192; a full channel blocks the source). Three types:
+Each source runs in its own thread and sends lines over a bounded channel (capacity 8192; a full channel blocks the source). Four types (`journald`, `file`, `command`, and on Windows `eventlog`, 6.7):
 
 ### 6.1 `journald`
 
@@ -216,10 +216,24 @@ Each source runs in its own thread and sends lines over a bounded channel (capac
 
 ### 6.6 Windows
 
-- No local journal: a journald source must set `host`. Otherwise, including when no config file exists, startup fails with an error that says so (`--demo` excepted).
+- No local journal: a journald source must set `host`, otherwise startup fails with an error that says so (`--demo` excepted).
+- Without any `[[source]]` section (including when no config file exists), the default source is `eventlog` with `channels = ["System", "Application"]` instead of journald.
+- An `eventlog` source on any other system is a startup error.
 - Config file: `%APPDATA%\lmatrix\config.toml`.
 - Each child runs in a job object with kill-on-close, and without a console of its own. Children are stopped on exit, and also when lmatrix is killed or its window is closed.
 - SIGHUP and terminal hang-up detection do not exist there; closing the console window ends the process.
+
+### 6.7 `eventlog` (Windows only)
+
+- Reads the local Windows event log through the Evt* API of `wevtapi.dll` (`EvtQuery`, `EvtSubscribe`, `EvtRender`, `EvtFormatMessage`). No child process.
+- `channels`: 1..64 channel names (one wait handle each), default `["System", "Application"]`. Names must not be empty or repeated (case-insensitive).
+- Line text: `<Channel> <Level> <Provider>[<EventID>]: <message>`. Level names: 1 `Critical`, 2 `Error`, 3 `Warning`, 0 and 4 `Information`, 5 `Verbose`, otherwise `Level<n>`. The message is the publisher's formatted message, with whitespace runs (including line breaks) collapsed to one space. Text returned with an unresolved-insert error is still used. Without a message, the EventData/UserData values are joined with `, `; without those, `(no message)`.
+- Timestamp: `TimeCreated`.
+- **Preload.** Each channel is queried in reverse for its newest `preload` events. The results are merged, and the newest `preload` overall are sent oldest first, followed by `PreloadDone`. The 6.4 heuristic is not needed.
+- **Follow.** A bookmark is kept on the newest event of each channel. The pull subscription starts strictly after it (`EvtSubscribeStartAfterBookmark | EvtSubscribeStrict`), or with future events when the channel had no backlog. If the bookmarked event no longer exists (log cleared or wrapped), the subscription starts with future events and reports `lmatrix: eventlog <channel>: bookmark lost, some events may be missing`. The whole log is never replayed.
+- Each channel's signal is reset before draining. The thread waits on all signals with a 1 s timeout and drains every channel on each wake.
+- A read error on a subscription is reported. The channel is resubscribed from its bookmark after 5 s.
+- A channel that cannot be opened (missing, or access denied, such as `Security` without administrator rights) is reported as `lmatrix: eventlog <channel>: <error>` and skipped. The other channels continue.
 
 ---
 
@@ -290,7 +304,7 @@ Log text is untrusted and must never reach the terminal raw.
 1. `--config <path>` if given.
 2. `$XDG_CONFIG_HOME/lmatrix/config.toml`, or `~/.config/lmatrix/config.toml`.
 3. `/etc/lmatrix/config.toml`.
-4. If none exists: built-in defaults with a single `journald` source and no rules.
+4. If none exists: built-in defaults with a single `journald` source (`eventlog` on Windows, 6.6) and no rules.
 
 ### 9.2 Full schema with defaults
 
@@ -314,7 +328,7 @@ replay_window = "auto"    # newest N backlog lines replays pick from, or "auto"
 
 [tail]
 backlog = 10000           # lines kept in memory
-preload = 200             # lines read at startup per journald/file source
+preload = 200             # lines read at startup per journald/eventlog/file source
 
 [[source]]
 type = "journald"
@@ -330,6 +344,10 @@ type = "command"
 run = "docker logs -f web"
 restart = true
 restart_delay = "5s"
+
+[[source]]
+type = "eventlog"         # Windows only
+channels = ["System", "Application"]
 
 [[rule]]
 name = "oom"
@@ -388,6 +406,7 @@ lmatrix/
     │   ├── journald.rs
     │   ├── file.rs
     │   ├── command.rs
+    │   ├── eventlog.rs  # Windows event log (Evt* API)
     │   ├── process.rs   # child processes: process groups / job objects
     │   └── demo.rs      # fake generator for --demo
     ├── sim/
@@ -447,7 +466,7 @@ Commit after each milestone. Each must build without warnings, pass `cargo clipp
 
 1. **Rain core.** `term`, `sim`, and `--demo`. The rain, fill factor, fading, replay and the help bar work with generated lines. Clean terminal restore in all exit paths.
 2. **Config and rules.** Config loading, validation, `--check`, `--print-default-config`. Colored drops, caught lines with decode, hold, dissolve, ack and the pending queue.
-3. **Sources.** `journald`, `file`, `command`, preload, labels, failure reporting.
+3. **Sources.** `journald`, `file`, `command`, `eventlog` (Windows), preload, labels, failure reporting.
 4. **Backlog views.** Backlog window, tail mode with scrolling and filter, freeze.
 5. **Compatibility.** 256 and 16 color modes, resize, too-small screen, `ascii_only`. README with configuration reference and notes for SSH, tmux and PuTTY.
 
@@ -463,7 +482,8 @@ Commit after each milestone. Each must build without warnings, pass `cargo clipp
 
 - **Sanitizing:** escape sequences, control characters, tabs, wide characters, over-long lines.
 - **Rules:** first match wins; all three hold forms parse; invalid regex is rejected with the rule's name.
-- **Config:** defaults; each validation error; unknown keys rejected.
+- **Config:** defaults (per platform); each validation error, including eventlog `channels`; unknown keys rejected; platform checks (local journald on Windows, eventlog elsewhere).
+- **Eventlog formatting:** FILETIME conversion, level names, line text with flattened messages and the data fallback, backlog merge order. On Windows, a real backlog read of `Application`.
 - **Backlog:** capacity and discard order.
 - **Sim, with a fixed seed:**
   - active drops never exceed `max_drops` for unmatched lines;
@@ -496,7 +516,7 @@ Run the binary in a detached tmux session and inspect it with `tmux capture-pane
 3. With no incoming lines at all, the rain continues through dimmed replays.
 4. A line matching a rule with a hold decodes in place in the rule's color, holds for the configured time, and dissolves. A line matching an `ack` rule stays until `a` or `A` is pressed.
 5. Tail mode shows the complete backlog including lines that were never rained, follows new lines, scrolls, and filters.
-6. At startup with a `journald` or `file` source, the backlog window and tail mode are populated immediately from preloaded lines.
+6. At startup with a `journald`, `eventlog` or `file` source, the backlog window and tail mode are populated immediately from preloaded lines.
 7. Works in 24-bit, 256-color and 16-color modes, inside tmux, and survives terminal resizes.
 8. The terminal is restored correctly after quit, Ctrl-C, SIGTERM, SIGHUP and a panic.
 9. A log line containing escape sequences cannot affect the terminal.

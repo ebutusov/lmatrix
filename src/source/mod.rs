@@ -2,6 +2,7 @@
 
 pub mod command;
 pub mod demo;
+pub mod eventlog;
 pub mod file;
 pub mod journald;
 pub mod process;
@@ -51,6 +52,12 @@ pub fn spawn(config: &SourceConfig, context: SourceContext, preload: usize) {
 			thread::Builder::new()
 				.name(format!("source-command-{}", context.id))
 				.spawn(move || command::run(settings, context))
+		}
+		SourceConfig::Eventlog { channels, .. } => {
+			let channels = channels.clone();
+			thread::Builder::new()
+				.name(format!("source-eventlog-{}", context.id))
+				.spawn(move || eventlog::run(channels, context, preload))
 		}
 	};
 	if let Err(error) = started {

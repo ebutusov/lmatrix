@@ -78,14 +78,28 @@ pub enum SourceConfig {
 		label: Option<String>,
 		strip_pattern: Option<String>,
 	},
+	/// Windows event log channels, read through the Evt* API.
+	Eventlog {
+		channels: Vec<String>,
+		label: Option<String>,
+		strip_pattern: Option<String>,
+	},
 }
+
+/// Default `channels` of an eventlog source.
+pub const DEFAULT_EVENTLOG_CHANNELS: [&str; 2] = ["System", "Application"];
+
+/// Most channels one eventlog source may follow: one wait handle each, and
+/// `WaitForMultipleObjects` takes at most 64.
+pub const MAX_EVENTLOG_CHANNELS: usize = 64;
 
 impl SourceConfig {
 	pub fn label(&self) -> Option<&str> {
 		match self {
 			SourceConfig::Journald { label, .. }
 			| SourceConfig::File { label, .. }
-			| SourceConfig::Command { label, .. } => label.as_deref(),
+			| SourceConfig::Command { label, .. }
+			| SourceConfig::Eventlog { label, .. } => label.as_deref(),
 		}
 	}
 
@@ -95,7 +109,8 @@ impl SourceConfig {
 		match self {
 			SourceConfig::Journald { strip_pattern, .. }
 			| SourceConfig::File { strip_pattern, .. }
-			| SourceConfig::Command { strip_pattern, .. } => strip_pattern.as_deref(),
+			| SourceConfig::Command { strip_pattern, .. }
+			| SourceConfig::Eventlog { strip_pattern, .. } => strip_pattern.as_deref(),
 		}
 	}
 
@@ -105,6 +120,27 @@ impl SourceConfig {
 			remote: None,
 			label: None,
 			strip_pattern: None,
+		}
+	}
+
+	pub fn default_eventlog() -> Self {
+		SourceConfig::Eventlog {
+			channels: DEFAULT_EVENTLOG_CHANNELS
+				.iter()
+				.map(|channel| channel.to_string())
+				.collect(),
+			label: None,
+			strip_pattern: None,
+		}
+	}
+
+	/// The source used without any `[[source]]` section: the local journal,
+	/// or on Windows the System and Application event logs.
+	pub fn platform_default() -> Self {
+		if cfg!(windows) {
+			Self::default_eventlog()
+		} else {
+			Self::default_journald()
 		}
 	}
 }
@@ -154,7 +190,7 @@ impl Default for Config {
 				backlog: 10_000,
 				preload: 200,
 			},
-			sources: vec![SourceConfig::default_journald()],
+			sources: vec![SourceConfig::platform_default()],
 			rules: Vec::new(),
 		}
 	}
@@ -162,22 +198,22 @@ impl Default for Config {
 
 impl Config {
 	/// Fails when a source reads the local journal on a system that has
-	/// none (Windows).
+	/// none (Windows), or the Windows event log elsewhere.
 	pub fn check_platform(&self) -> Result<()> {
-		self.check_local_journal(cfg!(unix))
+		self.check_platform_with(cfg!(unix), cfg!(windows))
 	}
 
-	fn check_local_journal(&self, available: bool) -> Result<()> {
-		if available {
-			return Ok(());
-		}
+	fn check_platform_with(&self, has_journal: bool, has_eventlog: bool) -> Result<()> {
 		for (index, source) in self.sources.iter().enumerate() {
-			if let SourceConfig::Journald { remote: None, .. } = source {
-				bail!(
+			match source {
+				SourceConfig::Journald { remote: None, .. } if !has_journal => bail!(
 					"source[{index}]: this system has no local journal; set host to read a \
-					 remote one over ssh (without any [[source]] section, a local journald \
-					 source is used)"
-				);
+					 remote one over ssh"
+				),
+				SourceConfig::Eventlog { .. } if !has_eventlog => {
+					bail!("source[{index}]: the Windows event log is only available on Windows")
+				}
+				_ => {}
 			}
 		}
 		Ok(())
@@ -347,6 +383,11 @@ enum RawSource {
 		label: Option<String>,
 		strip_pattern: Option<String>,
 	},
+	Eventlog {
+		channels: Option<Vec<String>>,
+		label: Option<String>,
+		strip_pattern: Option<String>,
+	},
 }
 
 #[derive(Deserialize)]
@@ -381,6 +422,31 @@ fn check_remote(
 		bail!("{key}.ssh_args: arguments must not be empty");
 	}
 	Ok(Some(RemoteHost { host, ssh_args }))
+}
+
+/// Validates the `channels` key of an eventlog source.
+fn check_channels(key: &str, channels: Option<Vec<String>>) -> Result<Vec<String>> {
+	let Some(channels) = channels else {
+		return Ok(DEFAULT_EVENTLOG_CHANNELS
+			.iter()
+			.map(|channel| channel.to_string())
+			.collect());
+	};
+	if channels.is_empty() || channels.len() > MAX_EVENTLOG_CHANNELS {
+		bail!("{key}: must list between 1 and {MAX_EVENTLOG_CHANNELS} channels");
+	}
+	for (index, channel) in channels.iter().enumerate() {
+		if channel.trim().is_empty() {
+			bail!("{key}: channel names must not be empty");
+		}
+		if channels[..index]
+			.iter()
+			.any(|other| other.eq_ignore_ascii_case(channel))
+		{
+			bail!("{key}: channel '{channel}' is listed twice");
+		}
+	}
+	Ok(channels)
 }
 
 fn check_range<T: PartialOrd + std::fmt::Display + Copy>(
@@ -630,6 +696,18 @@ impl RawConfig {
 								)?,
 							}
 						}
+						RawSource::Eventlog {
+							channels,
+							label,
+							strip_pattern,
+						} => SourceConfig::Eventlog {
+							channels: check_channels(&format!("{key}.channels"), channels)?,
+							label: check_label(&format!("{key}.label"), label)?,
+							strip_pattern: check_strip_pattern(
+								&format!("{key}.strip_pattern"),
+								strip_pattern,
+							)?,
+						},
 					});
 				}
 				sources
@@ -675,8 +753,22 @@ mod tests {
 		assert_eq!(config.display, defaults.display);
 		assert_eq!(config.rain, defaults.rain);
 		assert_eq!(config.tail, defaults.tail);
-		assert_eq!(config.sources, vec![SourceConfig::default_journald()]);
+		assert_eq!(config.sources, vec![SourceConfig::platform_default()]);
 		assert!(config.rules.is_empty());
+	}
+
+	#[test]
+	fn platform_default_source() {
+		let expected = if cfg!(windows) {
+			SourceConfig::Eventlog {
+				channels: vec!["System".into(), "Application".into()],
+				label: None,
+				strip_pattern: None,
+			}
+		} else {
+			SourceConfig::default_journald()
+		};
+		assert_eq!(Config::default().sources, vec![expected]);
 	}
 
 	#[test]
@@ -695,7 +787,9 @@ mod tests {
 		assert_eq!(config.display, defaults.display);
 		assert_eq!(config.rain, defaults.rain);
 		assert_eq!(config.tail, defaults.tail);
-		assert_eq!(config.sources, defaults.sources);
+		// The example file names its source explicitly; the Windows default
+		// (eventlog) is covered by `platform_default_source`.
+		assert_eq!(config.sources, vec![SourceConfig::default_journald()]);
 		assert!(config.rules.is_empty());
 	}
 
@@ -839,15 +933,61 @@ ssh_args = [""]"#
 
 	#[test]
 	fn local_journal_needs_platform_support() {
-		let local = Config::parse("").unwrap();
-		assert!(local.check_local_journal(true).is_ok());
-		let error = format!("{:#}", local.check_local_journal(false).unwrap_err());
+		let local = Config::parse("[[source]]\ntype = \"journald\"\n").unwrap();
+		assert!(local.check_platform_with(true, false).is_ok());
+		let error = format!("{:#}", local.check_platform_with(false, true).unwrap_err());
 		assert!(error.contains("source[0]") && error.contains("set host"));
 
 		let remote = Config::parse("[[source]]\ntype = \"journald\"\nhost = \"h\"\n").unwrap();
-		assert!(remote.check_local_journal(false).is_ok());
+		assert!(remote.check_platform_with(false, true).is_ok());
 		let none = Config::parse("source = []").unwrap();
-		assert!(none.check_local_journal(false).is_ok());
+		assert!(none.check_platform_with(false, false).is_ok());
+	}
+
+	#[test]
+	fn eventlog_needs_windows() {
+		let config = Config::parse(
+			"[[source]]\ntype = \"file\"\npath = \"/x\"\n[[source]]\ntype = \"eventlog\"\n",
+		)
+		.unwrap();
+		assert!(config.check_platform_with(false, true).is_ok());
+		let error = format!("{:#}", config.check_platform_with(true, false).unwrap_err());
+		assert!(error.contains("source[1]") && error.contains("only available on Windows"));
+	}
+
+	#[test]
+	fn eventlog_source() {
+		let defaults = Config::parse("[[source]]\ntype = \"eventlog\"\n").unwrap();
+		assert_eq!(defaults.sources, vec![SourceConfig::default_eventlog()]);
+		let custom = Config::parse(
+			r#"
+[[source]]
+type = "eventlog"
+channels = ["Microsoft-Windows-PowerShell/Operational"]
+label = "ps"
+"#,
+		)
+		.unwrap();
+		assert_eq!(
+			custom.sources,
+			vec![SourceConfig::Eventlog {
+				channels: vec!["Microsoft-Windows-PowerShell/Operational".into()],
+				label: Some("ps".into()),
+				strip_pattern: None,
+			}]
+		);
+		assert_eq!(custom.sources[0].label(), Some("ps"));
+	}
+
+	#[test]
+	fn eventlog_channel_errors() {
+		let source = |keys: &str| error_of(&format!("[[source]]\ntype = \"eventlog\"\n{keys}\n"));
+		assert!(source("channels = []").contains("source[0].channels"));
+		assert!(source(r#"channels = [" "]"#).contains("must not be empty"));
+		assert!(source(r#"channels = ["System", "system"]"#).contains("listed twice"));
+		let many: Vec<String> = (0..65).map(|index| format!("\"c{index}\"")).collect();
+		assert!(source(&format!("channels = [{}]", many.join(", "))).contains("between 1 and 64"));
+		assert!(source(r#"units = ["x"]"#).contains("units"));
 	}
 
 	#[test]

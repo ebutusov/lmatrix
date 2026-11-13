@@ -5,7 +5,7 @@
 [![CI](https://github.com/ebutusov/lmatrix/actions/workflows/ci.yml/badge.svg)](https://github.com/ebutusov/lmatrix/actions/workflows/ci.yml)
 
 A Matrix-rain style log viewer for Linux terminals, and for Windows Terminal
-when it reads a remote host's journal over ssh. The rain is made of real
+with the local Windows event log or a remote host's journal over ssh. The rain is made of real
 log text. Lines that match your rules "decode" out of the rain into readable
 text and stay on screen for a set time or until you acknowledge them. Tail
 mode shows the complete backlog as a plain log view.
@@ -110,8 +110,8 @@ lmatrix uses the first config file it finds:
    (on Windows: `%APPDATA%\lmatrix\config.toml`)
 3. `/etc/lmatrix/config.toml` (not on Windows)
 4. If none exists, built-in defaults: one `journald` source and no rules.
-   Windows has no local journal, so there this is an error that tells you to
-   write a config.
+   On Windows the default source is an `eventlog` source for the System and
+   Application logs.
 
 Unknown keys, out-of-range values, invalid colors, durations and regexes are
 startup errors that name the offending key or rule. Colors are written
@@ -147,7 +147,7 @@ startup errors that name the offending key or rule. Colors are written
 | Key | Default | Meaning |
 |---|---|---|
 | `backlog` | `10000` | Lines kept in memory, 1..10000000. When full, the oldest line is discarded |
-| `preload` | `200` | Lines read at startup per `journald` or `file` source, 0..100000 |
+| `preload` | `200` | Lines read at startup per `journald`, `eventlog` or `file` source, 0..100000 |
 
 ### `[[source]]`
 
@@ -155,7 +155,7 @@ Each source may set `label = "name"`, which prefixes each of its lines with
 `(name) `, and `strip_pattern`, which replaces `rain.strip_pattern` for its
 lines (`""` turns stripping off for that source). The pattern sees the whole
 line, label included. Without any `[[source]]` section, a single journald
-source is used.
+source is used (an eventlog source on Windows).
 Write `source = []` to run with no sources at all.
 
 ```toml
@@ -179,6 +179,10 @@ type = "command"
 run = "docker logs -f web"      # run through sh -c (PowerShell on Windows)
 restart = true                  # start it again when it exits
 restart_delay = "5s"            # at least 100ms
+
+[[source]]
+type = "eventlog"               # Windows only: the local event log
+channels = ["System", "Application"]   # the default; any channel name works
 ```
 
 - **journald.** Lines read `IDENTIFIER[PID]: MESSAGE`. Kernel messages arrive
@@ -206,6 +210,23 @@ restart_delay = "5s"            # at least 100ms
   loaded. lmatrix then follows each file from its end, polling every 250 ms.
   When a file is rotated or truncated, it is reopened from the start.
 - **command.** Has no preload.
+- **eventlog** (Windows only). Reads the local Windows event log through the
+  Event Log API, with no child process. Lines read
+  `CHANNEL LEVEL PROVIDER[EVENTID]: MESSAGE`, for example
+  `System Error Service Control Manager[7031]: The Print Spooler service
+  terminated unexpectedly.` The level (`Critical`, `Error`, `Warning`,
+  `Information`, `Verbose`) is part of the text, so rules can match it.
+  Multi-line messages are joined into one line. When a provider's message
+  cannot be resolved, the event's data values are shown instead.
+  - At startup the newest `preload` events across all channels are loaded.
+    Live events then follow right after them, without gaps or repeats.
+  - `channels` lists 1 to 64 channel names, such as
+    `"Microsoft-Windows-PowerShell/Operational"` (see `wevtutil el`).
+  - A channel that does not exist or cannot be read (`Security` needs an
+    administrator) shows up as a `lmatrix: eventlog <channel>: …` line. The
+    other channels keep working.
+  - If the log is cleared or wraps while lmatrix is reading it, the
+    subscription restarts with new events and says so in a `lmatrix:` line.
 
 Child processes (`journalctl`, `ssh`, commands, and anything they start) run
 in their own process group (a job object on Windows) and are stopped when
@@ -279,14 +300,14 @@ and `AcceptEnv COLORTERM` to the server's `sshd_config`.
 
 ## Windows
 
-lmatrix runs in Windows Terminal (PowerShell or cmd) and shows the journals
-of your Linux servers, read over ssh. Build it on Windows with
+lmatrix runs in Windows Terminal (PowerShell or cmd). It shows the local
+Windows event log and the journals of your Linux servers, read over ssh. Build it on Windows with
 `cargo build --release` and run `target\release\lmatrix.exe`. Windows
 Terminal sets `COLORTERM=truecolor`, so colors are detected.
 
-- There is no local journal: every `journald` source needs `host`. Without a
-  config file, lmatrix stops with an error that says so (`--demo` still
-  works).
+- Without a config file, lmatrix follows the System and Application event
+  logs (an `eventlog` source).
+- There is no local journal: every `journald` source needs `host`.
 - `ssh.exe` comes from the OpenSSH client that ships with Windows 10 and
   later.
 - `command` sources run through PowerShell
@@ -473,6 +494,7 @@ the cells that changed.
 | `src/source/process.rs` | Child processes: process groups (Unix) or job objects (Windows), stopping them all on exit |
 | `src/source/journald.rs` | `journald` source: runs journalctl locally or through ssh, reads the backlog, resumes by cursor, formats entries |
 | `src/source/file.rs` | `file` source: follows every file matching a glob, handles rotation and truncation |
+| `src/source/eventlog.rs` | `eventlog` source (Windows): reads the backlog and subscribes through the Evt* API, resumes by bookmark, formats events |
 | `src/source/command.rs` | `command` source: runs a shell command (sh or PowerShell), reads stdout and stderr, restarts it |
 | `src/source/demo.rs` | Fake line generator and demo rules for `--demo` |
 | `src/sim/mod.rs` | `Sim`: push, tick, resize, ack; ties the backlog, rules, rain and caught lines together; replay and `strip_pattern`. Never touches the terminal |
