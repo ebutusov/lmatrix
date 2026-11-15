@@ -1,0 +1,102 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*.*.*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing tag to (re)build and publish, e.g. v0.1.0
+        required: true
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+  TAG: ${{ inputs.tag || github.ref_name }}
+
+jobs:
+  check-version:
+    name: check tag matches Cargo.toml
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.TAG }}
+      - name: Compare versions
+        shell: bash
+        run: |
+          version=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -n1)
+          if [ "v$version" != "$TAG" ]; then
+            echo "::error::Tag $TAG does not match Cargo.toml version $version"
+            exit 1
+          fi
+
+  build:
+    name: build (${{ matrix.target }})
+    needs: check-version
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-musl
+            os: ubuntu-latest
+          - target: aarch64-unknown-linux-musl
+            os: ubuntu-24.04-arm
+          - target: x86_64-pc-windows-msvc
+            os: windows-latest
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.TAG }}
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - name: Install musl tools
+        if: contains(matrix.target, 'musl')
+        run: sudo apt-get update && sudo apt-get install -y musl-tools
+      - name: Build
+        run: cargo build --release --locked --target ${{ matrix.target }}
+      - name: Package
+        shell: bash
+        run: |
+          name="lmatrix-$TAG-${{ matrix.target }}"
+          mkdir -p "dist/$name"
+          cp README.md LICENSE lmatrix.example.toml "dist/$name/"
+          cd dist
+          if [[ "${{ matrix.target }}" == *windows* ]]; then
+            cp "../target/${{ matrix.target }}/release/lmatrix.exe" "$name/"
+            7z a "$name.zip" "$name" > /dev/null
+            sha256sum "$name.zip" > "$name.zip.sha256"
+          else
+            cp "../target/${{ matrix.target }}/release/lmatrix" "$name/"
+            tar czf "$name.tar.gz" "$name"
+            sha256sum "$name.tar.gz" > "$name.tar.gz.sha256"
+          fi
+          rm -rf "$name"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.target }}
+          path: dist/*
+
+  publish:
+    name: publish release
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Create or update GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          if gh release view "$TAG" > /dev/null 2>&1; then
+            gh release upload "$TAG" dist/* --clobber
+          else
+            gh release create "$TAG" dist/* --title "lmatrix $TAG" --generate-notes --verify-tag
+          fi

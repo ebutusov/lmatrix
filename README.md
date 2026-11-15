@@ -3,6 +3,8 @@
 <img width="955" height="501" alt="lmatrix_img" src="https://github.com/user-attachments/assets/628cd409-e9df-4777-982a-fd257cefe179" />
 
 [![CI](https://github.com/ebutusov/lmatrix/actions/workflows/ci.yml/badge.svg)](https://github.com/ebutusov/lmatrix/actions/workflows/ci.yml)
+[![Release](https://github.com/ebutusov/lmatrix/actions/workflows/release.yml/badge.svg)](https://github.com/ebutusov/lmatrix/actions/workflows/release.yml)
+[![Latest release](https://img.shields.io/github/v/release/ebutusov/lmatrix)](https://github.com/ebutusov/lmatrix/releases/latest)
 
 A Matrix-rain style log viewer for Linux terminals, and for Windows Terminal
 with the local Windows event log or a remote host's journal over ssh. The rain is made of real
@@ -22,7 +24,9 @@ mode shows the complete backlog as a plain log view.
 
 ## Build and run
 
-Needs a Rust toolchain (edition 2024).
+Prebuilt binaries for Linux (x86_64 and aarch64, static musl) and Windows
+(x86_64) are attached to each [release](https://github.com/ebutusov/lmatrix/releases).
+To build from source you need a Rust toolchain (edition 2024).
 
 ```sh
 cargo build --release
