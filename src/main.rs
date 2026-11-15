@@ -27,7 +27,12 @@ const SHUTDOWN_SIGNALS: &[i32] = &[signal_hook::consts::SIGTERM, signal_hook::co
 
 /// Matrix-rain style log viewer: the rain is made of your logs.
 #[derive(Parser, Debug)]
-#[command(version, about)]
+#[command(
+	version = concat!(env!("CARGO_PKG_VERSION"), "\n", env!("CARGO_PKG_AUTHORS")),
+	author,
+	about,
+	help_template = "{about-with-newline}Author: {author}\n\n{usage-heading} {usage}\n\n{all-args}{after-help}"
+)]
 struct Args {
 	/// Use this config file.
 	#[arg(long, value_name = "PATH")]
