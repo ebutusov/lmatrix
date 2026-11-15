@@ -54,9 +54,10 @@ This document is the complete implementation brief. Where it gives a number, tha
 
 Entered and left with Enter. Tail mode **replaces** the rain.
 
-- Row 0: help bar `TAIL  [enter] rain  [up/down] scroll  [/] filter  [q] quit`, with `N lines` (backlog size, or matching lines when filtered) on the right.
+- Row 0: help bar `TAIL  [enter] rain  [arrows] scroll  [/] filter  [q] quit`, with `N lines` (backlog size, or matching lines when filtered) on the right.
 - All remaining rows: backlog entries, one per row, oldest at top, newest at bottom, same line format and colors as the backlog window.
 - Follows new lines by default. Scrolling up stops following; End (or `G`) jumps to the newest line and resumes following.
+- Left / Right shift the message text of all rows 8 columns at a time; the timestamp stays in place. `…` marks text hidden on either side, the shift stops once the end of the longest visible line is on screen, and the help bar shows `col N` while shifted. Entering tail mode resets the shift.
 - The rain simulation keeps running while tail mode is shown, so switching back is seamless.
 
 ### 2.3 Colors
@@ -288,6 +289,7 @@ Log text is untrusted and must never reach the terminal raw.
 | `A` | Acknowledge all waiting lines | — |
 | Up / Down, PgUp / PgDn, Home | — | Scroll |
 | End or `G` | — | Jump to newest, resume following |
+| Left / Right | — | Shift long lines horizontally |
 | `/` | — | Enter a filter regex; Enter applies, Esc cancels |
 | Esc | — | Clear the active filter |
 | `q`, Ctrl-C | Quit | Quit |

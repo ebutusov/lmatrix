@@ -12,7 +12,18 @@ use crate::line::truncate_with_ellipsis;
 use crate::rules::RuleSet;
 use crate::term::{Cell, Frame, TermColor};
 
-pub const TAIL_HELP: &str = "TAIL  [enter] rain  [up/down] scroll  [/] filter  [q] quit";
+pub const TAIL_HELP: &str = "TAIL  [enter] rain  [arrows] scroll  [/] filter  [q] quit";
+
+/// Columns the message moves per Left / Right key.
+const HSCROLL_STEP: usize = 8;
+
+/// Length of the `HH:MM:SS ` prefix of a row.
+const TIMESTAMP_LEN: usize = 9;
+
+/// Cells available for the message after the margins and the timestamp.
+fn message_width(cols: u16) -> usize {
+	(cols as usize).saturating_sub(2 + TIMESTAMP_LEN)
+}
 
 /// What the main loop should do after a key in tail mode.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -30,7 +41,10 @@ pub struct RowStyle {
 }
 
 /// Draws one backlog entry as `HH:MM:SS text` on `row`, truncated to fit.
-/// The message uses its rule's color if it matched one.
+/// The message uses its rule's color if it matched one. `hscroll` skips that
+/// many characters of the message (the timestamp stays put); an ellipsis
+/// marks text hidden on either side.
+#[allow(clippy::too_many_arguments)]
 pub fn draw_entry(
 	frame: &mut Frame,
 	row: u16,
@@ -39,6 +53,7 @@ pub fn draw_entry(
 	style: &RowStyle,
 	palette: &Palette,
 	ascii_only: bool,
+	hscroll: usize,
 ) {
 	let cols = frame.cols();
 	frame.fill_row(
@@ -53,8 +68,22 @@ pub fn draw_entry(
 	// One cell of margin on each side.
 	let width = (cols as usize).saturating_sub(2);
 	let timestamp = entry.line.ts.format("%H:%M:%S ").to_string();
-	let full = format!("{timestamp}{}", entry.line.text);
-	let shown = truncate_with_ellipsis(&full, width, ascii_only);
+	let msg_width = message_width(cols);
+	let shown = if hscroll == 0 || msg_width == 0 {
+		let full = format!("{timestamp}{}", entry.line.text);
+		truncate_with_ellipsis(&full, width, ascii_only)
+	} else {
+		let rest: String = entry.line.text.chars().skip(hscroll).collect();
+		let mut message: Vec<char> = truncate_with_ellipsis(&rest, msg_width, ascii_only)
+			.chars()
+			.collect();
+		let ellipsis = if ascii_only { "..." } else { "…" };
+		for (slot, ch) in message.iter_mut().zip(ellipsis.chars()) {
+			*slot = ch;
+		}
+		let message: String = message.into_iter().collect();
+		format!("{timestamp}{message}")
+	};
 	let timestamp_len = timestamp.chars().count().min(shown.chars().count());
 	let message_color = entry
 		.rule
@@ -96,6 +125,8 @@ pub struct TailView {
 	editing: Option<String>,
 	/// Error shown on the prompt for an invalid filter.
 	error: Option<String>,
+	/// Characters of each message hidden on the left (Left / Right keys).
+	hscroll: usize,
 }
 
 impl TailView {
@@ -115,9 +146,30 @@ impl TailView {
 		self.filter.as_ref().map(Regex::as_str)
 	}
 
-	/// Starts following again, e.g. when the view is entered.
+	/// Starts following again from the left edge, e.g. when the view is
+	/// entered.
 	pub fn follow(&mut self) {
 		self.follow = true;
+		self.hscroll = 0;
+	}
+
+	/// Largest useful horizontal offset: the one that shows the end of the
+	/// longest visible message.
+	fn max_hscroll(&self, backlog: &Backlog, visible_rows: usize, cols: u16) -> usize {
+		let top = self.top_position(backlog, visible_rows);
+		let longest = (top..top + visible_rows)
+			.map_while(|position| self.seq_at(position, backlog))
+			.filter_map(|seq| backlog.get_seq(seq))
+			.map(|entry| entry.line.text.chars().count())
+			.max()
+			.unwrap_or(0);
+		longest.saturating_sub(message_width(cols))
+	}
+
+	/// Horizontal offset used for drawing, clamped to the visible lines.
+	fn effective_hscroll(&self, backlog: &Backlog, visible_rows: usize, cols: u16) -> usize {
+		self.hscroll
+			.min(self.max_hscroll(backlog, visible_rows, cols))
 	}
 
 	/// Tests new backlog entries against the filter and forgets discarded ones.
@@ -196,6 +248,7 @@ impl TailView {
 		key: KeyEvent,
 		backlog: &Backlog,
 		visible_rows: usize,
+		cols: u16,
 	) -> TailAction {
 		if let Some(input) = &mut self.editing {
 			match key.code {
@@ -259,6 +312,14 @@ impl TailView {
 			KeyCode::PageDown => self.scroll_to((top + page).min(max_top), backlog),
 			KeyCode::Home => self.scroll_to(0, backlog),
 			KeyCode::End | KeyCode::Char('G') => self.follow = true,
+			KeyCode::Left => {
+				let current = self.effective_hscroll(backlog, visible_rows, cols);
+				self.hscroll = current.saturating_sub(HSCROLL_STEP);
+			}
+			KeyCode::Right => {
+				let max = self.max_hscroll(backlog, visible_rows, cols);
+				self.hscroll = (self.hscroll.min(max) + HSCROLL_STEP).min(max);
+			}
 			_ => {}
 		}
 		TailAction::None
@@ -275,6 +336,7 @@ impl TailView {
 	) {
 		let rows = frame.rows();
 		let visible_rows = rows.saturating_sub(1) as usize;
+		let hscroll = self.effective_hscroll(backlog, visible_rows, frame.cols());
 
 		if let Some(input) = &self.editing {
 			let prompt = match &self.error {
@@ -293,7 +355,11 @@ impl TailView {
 				),
 				None => TAIL_HELP.to_string(),
 			};
-			let count = format!("{} lines", self.len(backlog));
+			let count = if hscroll > 0 {
+				format!("col {}  {} lines", hscroll + 1, self.len(backlog))
+			} else {
+				format!("{} lines", self.len(backlog))
+			};
 			draw_help_bar(frame, 0, &left, Some((&count, palette.help_fg)), palette);
 		}
 
@@ -316,6 +382,7 @@ impl TailView {
 					&style,
 					palette,
 					ascii_only,
+					hscroll,
 				);
 			}
 		}
@@ -398,7 +465,7 @@ mod tests {
 	fn scrolling_stops_following_and_end_resumes() {
 		let mut backlog = backlog_with(10, 100);
 		let mut view = TailView::new();
-		view.handle_key(key(KeyCode::Up), &backlog, 3);
+		view.handle_key(key(KeyCode::Up), &backlog, 3, 40);
 		assert_eq!(
 			visible_texts(&view, &backlog, 4),
 			["line 6 even", "line 7 odd", "line 8 even"]
@@ -408,11 +475,11 @@ mod tests {
 			rule: None,
 		});
 		assert_eq!(visible_texts(&view, &backlog, 4)[0], "line 6 even");
-		view.handle_key(key(KeyCode::Home), &backlog, 3);
+		view.handle_key(key(KeyCode::Home), &backlog, 3, 40);
 		assert_eq!(visible_texts(&view, &backlog, 4)[0], "line 0 even");
-		view.handle_key(key(KeyCode::PageDown), &backlog, 3);
+		view.handle_key(key(KeyCode::PageDown), &backlog, 3, 40);
 		assert_eq!(visible_texts(&view, &backlog, 4)[0], "line 3 odd");
-		view.handle_key(key(KeyCode::Char('G')), &backlog, 3);
+		view.handle_key(key(KeyCode::Char('G')), &backlog, 3, 40);
 		assert_eq!(visible_texts(&view, &backlog, 4)[2], "line 10");
 	}
 
@@ -420,12 +487,12 @@ mod tests {
 	fn filter_applies_and_clears() {
 		let mut backlog = backlog_with(10, 100);
 		let mut view = TailView::new();
-		view.handle_key(key(KeyCode::Char('/')), &backlog, 3);
+		view.handle_key(key(KeyCode::Char('/')), &backlog, 3, 40);
 		assert!(view.is_editing());
 		for ch in "od+".chars() {
-			view.handle_key(key(KeyCode::Char(ch)), &backlog, 3);
+			view.handle_key(key(KeyCode::Char(ch)), &backlog, 3, 40);
 		}
-		view.handle_key(key(KeyCode::Enter), &backlog, 3);
+		view.handle_key(key(KeyCode::Enter), &backlog, 3, 40);
 		assert!(!view.is_editing());
 		assert_eq!(view.filter_text(), Some("od+"));
 		assert_eq!(
@@ -443,7 +510,7 @@ mod tests {
 		view.update(&backlog);
 		assert_eq!(view.len(&backlog), 6);
 		assert_eq!(visible_texts(&view, &backlog, 4)[2], "line 10 odd");
-		view.handle_key(key(KeyCode::Esc), &backlog, 3);
+		view.handle_key(key(KeyCode::Esc), &backlog, 3, 40);
 		assert_eq!(view.filter_text(), None);
 		assert_eq!(view.len(&backlog), 12);
 	}
@@ -452,13 +519,13 @@ mod tests {
 	fn invalid_filter_is_not_applied() {
 		let backlog = backlog_with(5, 100);
 		let mut view = TailView::new();
-		view.handle_key(key(KeyCode::Char('/')), &backlog, 3);
-		view.handle_key(key(KeyCode::Char('(')), &backlog, 3);
-		view.handle_key(key(KeyCode::Enter), &backlog, 3);
+		view.handle_key(key(KeyCode::Char('/')), &backlog, 3, 40);
+		view.handle_key(key(KeyCode::Char('(')), &backlog, 3, 40);
+		view.handle_key(key(KeyCode::Enter), &backlog, 3, 40);
 		assert!(view.is_editing());
 		assert!(view.error.is_some());
 		assert_eq!(view.filter_text(), None);
-		view.handle_key(key(KeyCode::Esc), &backlog, 3);
+		view.handle_key(key(KeyCode::Esc), &backlog, 3, 40);
 		assert!(!view.is_editing());
 	}
 
@@ -477,5 +544,45 @@ mod tests {
 		view.update(&backlog);
 		// line 0 and line 2 were discarded.
 		assert_eq!(view.len(&backlog), 3);
+	}
+
+	#[test]
+	fn left_right_shift_long_lines() {
+		let mut backlog = Backlog::new(10);
+		let long: String = ('a'..='z').chain('A'..='Z').collect(); // 52 chars
+		backlog.push(Entry {
+			line: LogLine::new(Local::now(), 0, long.clone()),
+			rule: None,
+		});
+		let mut view = TailView::new();
+		// 40 columns leave 29 for the message.
+		assert_eq!(
+			visible_texts(&view, &backlog, 4),
+			[format!("{}…", &long[..28])]
+		);
+		view.handle_key(key(KeyCode::Right), &backlog, 3, 40);
+		assert_eq!(
+			visible_texts(&view, &backlog, 4),
+			[format!("…{}…", &long[9..36])]
+		);
+		// Clamped so the end of the longest line touches the right edge.
+		for _ in 0..10 {
+			view.handle_key(key(KeyCode::Right), &backlog, 3, 40);
+		}
+		assert_eq!(view.hscroll, 52 - 29);
+		assert_eq!(
+			visible_texts(&view, &backlog, 4),
+			[format!("…{}", &long[24..])]
+		);
+		view.handle_key(key(KeyCode::Left), &backlog, 3, 40);
+		assert_eq!(view.hscroll, 52 - 29 - 8);
+		for _ in 0..5 {
+			view.handle_key(key(KeyCode::Left), &backlog, 3, 40);
+		}
+		assert_eq!(view.hscroll, 0);
+		assert_eq!(
+			visible_texts(&view, &backlog, 4),
+			[format!("{}…", &long[..28])]
+		);
 	}
 }
