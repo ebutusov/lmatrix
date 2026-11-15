@@ -263,12 +263,9 @@ impl Sim {
 		self.replay(dt);
 	}
 
-	pub fn ack_oldest(&mut self) {
-		self.caught.ack_oldest(self.now);
-	}
-
-	pub fn ack_all(&mut self) {
-		self.caught.ack_all(self.now);
+	/// Acknowledges the waiting lines on screen; queued ones move up next.
+	pub fn ack_visible(&mut self) {
+		self.caught.ack_visible(self.now);
 	}
 
 	fn random_speed(&mut self) -> f32 {
@@ -705,22 +702,9 @@ mod tests {
 		run(&mut sim, Duration::from_secs(600));
 		assert_eq!(sim.caught_lines().len(), 2);
 		let text: String = sim.caught_lines()[0].chars.iter().collect();
-		assert!(text.ends_with(" [a]"));
+		assert!(text.ends_with(" [A]"));
 
-		sim.ack_oldest();
-		assert_eq!(sim.ack_count(), 1);
-		let remaining: Vec<String> = sim
-			.caught_lines()
-			.iter()
-			.filter(|caught| caught.waiting())
-			.map(|caught| caught.chars.iter().collect())
-			.collect();
-		assert_eq!(remaining.len(), 1);
-		assert!(remaining[0].contains("CRIT second"));
-		run(&mut sim, Duration::from_millis(1550));
-		assert_eq!(sim.caught_lines().len(), 1);
-
-		sim.ack_all();
+		sim.ack_visible();
 		assert_eq!(sim.ack_count(), 0);
 		run(&mut sim, Duration::from_millis(1550));
 		assert_eq!(sim.caught_lines().len(), 0);
@@ -774,18 +758,48 @@ mod tests {
 		assert_eq!(sim.pending_len(), caught::MAX_PENDING);
 		assert_eq!(sim.ack_count(), 4);
 
-		sim.ack_oldest();
+		sim.ack_visible();
 		run(&mut sim, Duration::from_millis(1600));
 		assert_eq!(sim.caught_lines().len(), 4);
-		assert_eq!(sim.pending_len(), caught::MAX_PENDING - 1);
-		// The oldest kept pending line (10, after 0..9 were discarded) was placed.
-		assert!(sim.caught_lines().iter().any(|caught| {
-			caught
-				.chars
-				.iter()
-				.collect::<String>()
-				.contains("pending 10")
-		}));
+		assert_eq!(sim.pending_len(), caught::MAX_PENDING - 4);
+		// The oldest kept pending lines (10.., after 0..9 were discarded) were placed.
+		let mut texts: Vec<String> = sim
+			.caught_lines()
+			.iter()
+			.map(|caught| caught.chars.iter().collect())
+			.collect();
+		texts.sort();
+		for (text, index) in texts.iter().zip(10..14) {
+			assert!(text.ends_with(&format!("WARN pending {index}")), "{text}");
+		}
+	}
+
+	#[test]
+	fn ack_keeps_queued_ack_lines() {
+		let mut sim = sim_with(no_replay(), 80, 6);
+		for index in 0..7 {
+			sim.push(line(&format!("CRIT {index}")));
+		}
+		sim.tick(FRAME);
+		assert_eq!(sim.caught_lines().len(), 4);
+		assert_eq!(sim.pending_len(), 3);
+		assert_eq!(sim.ack_count(), 7);
+
+		sim.ack_visible();
+		assert_eq!(sim.ack_count(), 3);
+		run(&mut sim, Duration::from_millis(1600));
+		assert_eq!(sim.pending_len(), 0);
+		let mut texts: Vec<String> = sim
+			.caught_lines()
+			.iter()
+			.filter(|caught| caught.waiting())
+			.map(|caught| caught.chars.iter().collect())
+			.collect();
+		texts.sort();
+		assert_eq!(texts.len(), 3);
+		for (text, index) in texts.iter().zip(4..7) {
+			assert!(text.contains(&format!("CRIT {index}")), "{text}");
+		}
 	}
 
 	#[test]
@@ -817,7 +831,7 @@ mod tests {
 		assert!(caught.row >= 1 && caught.row <= 3);
 		assert!(caught.col >= 1 && caught.col as usize + caught.chars.len() < 40);
 		let text: String = caught.chars.iter().collect();
-		assert!(text.ends_with("… [a]"));
+		assert!(text.ends_with("… [A]"));
 	}
 
 	#[test]

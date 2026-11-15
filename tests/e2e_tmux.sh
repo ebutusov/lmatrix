@@ -66,9 +66,9 @@ hold = "ack"
 TOML
 start "$BIN --config $WORK/ack.toml" 2.5
 check "ack rule shows 'ack 1'" '[[ "$(row 1)" == *"ack 1" ]]'
-check "caught line decoded on screen" 'screen | grep -q "Out of memory: Killed process 4312 (java) \[a\]\|Out of memory: Killed process 4312 (java)"'
-tmux send-keys -t "$SESSION" a; sleep 0.5
-check "'a' clears the ack count" '[[ "$(row 1)" != *"ack 1"* ]]'
+check "caught line decoded on screen" 'screen | grep -q "Out of memory: Killed process 4312 (java) \[A\]\|Out of memory: Killed process 4312 (java)"'
+tmux send-keys -t "$SESSION" A; sleep 0.5
+check "'A' clears the ack count" '[[ "$(row 1)" != *"ack 1"* ]]'
 tmux send-keys -t "$SESSION" q; sleep 0.7
 check "child command terminated on quit" '! pgrep -f "sleep 3600" >/dev/null'
 

@@ -35,7 +35,7 @@ This document is the complete implementation brief. Where it gives a number, tha
 
 ```
 ┌──────────────────────────────────────────────────────────────┐
-│ [enter] tail  [space] freeze  [a] ack  [A] ack all  [q] quit  ack 2 │  row 0: help bar
+│ [enter] tail  [space] freeze  [A] ack  [q] quit               ack 2 │  row 0: help bar
 │  s      k   n                d                                 │
 │  y      e   g       19:58:02 kernel: Out of memory: killed ... │  rain area, with a
 │  s      r   i                o                                 │  caught line decoded
@@ -153,17 +153,17 @@ Rules are evaluated in config order; the first match wins. An invalid regex is a
 
 When a line matches a rule with a hold, a caught line appears over the rain:
 
-- **Text:** `HH:MM:SS ` followed by the line, truncated with `…` so that it fits the screen width with two cells of margin on each side. For `ack` rules the text ends with ` [a]`, and room for that marker is reserved before truncating.
+- **Text:** `HH:MM:SS ` followed by the line, truncated with `…` so that it fits the screen width with two cells of margin on each side. For `ack` rules the text ends with ` [A]`, and room for that marker is reserved before truncating.
 - **Position:** a random free row of the rain area, excluding its first and last row, and a random column at which the whole text plus one padding cell on each side fits. One caught line per row.
 - **Background:** the text extent plus one padding cell on each side is cleared, hiding the rain behind it. The rain continues underneath.
 - **Decode:** characters are revealed left to right at 32 characters per second. Positions not yet revealed show a random glyph (same glyph set as in 4.1) that changes every frame, in dim green. Revealed characters use the rule's color.
 - **Hold:** the line stays fully readable for the rule's hold time, measured from its appearance.
 - **Dissolve:** over 1.5 seconds, characters disappear one by one in a fixed pseudo-random order (not left to right), until the line is gone.
-- **Ack marker:** on lines waiting for acknowledgement, the `[a]` at the end is white and blinks, 0.5 s on and 0.5 s off.
+- **Ack marker:** on lines waiting for acknowledgement, the `[A]` at the end is white and blinks, 0.5 s on and 0.5 s off.
 
 ### 5.3 Acknowledging
 
-- `a` acknowledges the oldest waiting line, `A` acknowledges all. An acknowledged line starts its dissolve immediately.
+- `A` acknowledges every waiting line on screen. An acknowledged line starts its dissolve immediately. Lines waiting in the queue (5.4) are not acknowledged: they take the freed rows, so each `A` clears one screenful and no caught line is lost.
 - Acknowledgement is only possible in rain mode.
 
 ### 5.4 When the screen is full of caught lines
@@ -285,8 +285,7 @@ Log text is untrusted and must never reach the terminal raw.
 |---|---|---|
 | Enter | Switch to tail mode | Switch to rain mode |
 | Space | Freeze / unfreeze | — |
-| `a` | Acknowledge oldest waiting line | — |
-| `A` | Acknowledge all waiting lines | — |
+| `A` | Acknowledge the waiting lines on screen | — |
 | Up / Down, PgUp / PgDn, Home | — | Scroll |
 | End or `G` | — | Jump to newest, resume following |
 | Left / Right | — | Shift long lines horizontally |
@@ -446,8 +445,7 @@ impl Sim {
     pub fn push(&mut self, line: LogLine);
     pub fn tick(&mut self, dt: Duration);
     pub fn resize(&mut self, cols: u16, rows: u16);
-    pub fn ack_oldest(&mut self);
-    pub fn ack_all(&mut self);
+    pub fn ack_visible(&mut self);
 }
 ```
 
@@ -497,7 +495,7 @@ Commit after each milestone. Each must build without warnings, pass `cargo clipp
   - replay tops up to the reserve limit and not beyond, and stops when live lines fill the rain;
   - replay drops use the default color and a non-zero start offset is possible;
   - a caught line with a timed hold is gone after hold + 1.5 s;
-  - an `ack` line stays until acknowledged, and `ack_oldest` picks the oldest;
+  - an `ack` line stays until acknowledged, and `ack_visible` keeps queued ack lines;
   - eviction and the pending queue behave as in 5.4;
   - preloaded lines produce no live drops and no caught lines.
 - **Color:** quantization to 256 and 16 colors for known inputs.
@@ -509,7 +507,7 @@ Run the binary in a detached tmux session and inspect it with `tmux capture-pane
 
 - `lmatrix --demo` shows the help bar on the first row and the backlog window on the last two.
 - Sending Enter switches to tail mode (help bar starts with `TAIL`); Enter again switches back.
-- A `command` source that echoes a line matching an `ack` rule makes `ack 1` appear in the help bar; sending `a` clears it.
+- A `command` source that echoes a line matching an `ack` rule makes `ack 1` appear in the help bar; sending `A` clears it.
 - After sending `q`, and separately after `kill -TERM`, the pane is back at a usable shell prompt with a visible cursor.
 
 ---
@@ -519,7 +517,7 @@ Run the binary in a detached tmux session and inspect it with `tmux capture-pane
 1. With `--demo` on an 80×24 terminal the screen matches section 2.1 and the rain is never empty.
 2. With an event rate far above what the fill factor allows (for example a `command` source running `yes`), the rain density stays at the fill factor, the app stays responsive, memory stays bounded, and tail mode still shows every received line up to the backlog size.
 3. With no incoming lines at all, the rain continues through dimmed replays.
-4. A line matching a rule with a hold decodes in place in the rule's color, holds for the configured time, and dissolves. A line matching an `ack` rule stays until `a` or `A` is pressed.
+4. A line matching a rule with a hold decodes in place in the rule's color, holds for the configured time, and dissolves. A line matching an `ack` rule stays until `A` is pressed.
 5. Tail mode shows the complete backlog including lines that were never rained, follows new lines, scrolls, and filters.
 6. At startup with a `journald`, `eventlog` or `file` source, the backlog window and tail mode are populated immediately from preloaded lines.
 7. Works in 24-bit, 256-color and 16-color modes, inside tmux, and survives terminal resizes.

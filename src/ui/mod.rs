@@ -321,8 +321,7 @@ impl App {
 					self.tail.follow();
 				}
 				KeyCode::Char(' ') => self.frozen = !self.frozen,
-				KeyCode::Char('a') => self.sim.ack_oldest(),
-				KeyCode::Char('A') => self.sim.ack_all(),
+				KeyCode::Char('A') => self.sim.ack_visible(),
 				_ => {}
 			},
 			Mode::Tail => {

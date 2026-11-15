@@ -11,7 +11,7 @@ const MIN_VISIBLE_LEVEL: f32 = 0.06;
 /// Brightness above which a rain cell is drawn in the head color.
 const HEAD_LEVEL: f32 = 0.95;
 
-pub const RAIN_HELP: &str = "[enter] tail  [space] freeze  [a] ack  [A] ack all  [q] quit";
+pub const RAIN_HELP: &str = "[enter] tail  [space] freeze  [A] ack  [q] quit";
 
 /// Draws a help bar on `row`: `left` text, and `right` text in its own
 /// color aligned to the right edge.

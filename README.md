@@ -13,9 +13,9 @@ text and stay on screen for a set time or until you acknowledge them. Tail
 mode shows the complete backlog as a plain log view.
 
 ```
- [enter] tail  [space] freeze  [a] ack  [A] ack all  [q] quit           ack 1
+ [enter] tail  [space] freeze  [A] ack  [q] quit                        ack 1
   s      k   n                d
-  y      e   g    19:58:02 kernel: Out of memory: killed process 4312 [a]
+  y      e   g    19:58:02 kernel: Out of memory: killed process 4312 [A]
   s      r   i                o
   t      n   n                c
  19:58:01 systemd[1]: Started nginx.service
@@ -69,8 +69,7 @@ lmatrix --check
 |---|---|---|
 | Enter | Switch to tail mode | Switch to rain mode |
 | Space | Freeze / unfreeze the animation | — |
-| `a` | Acknowledge the oldest waiting line | — |
-| `A` | Acknowledge all waiting lines | — |
+| `A` | Acknowledge the waiting lines on screen; queued ones take their place | — |
 | Up / Down, PgUp / PgDn, Home | — | Scroll (stops following) |
 | End or `G` | — | Jump to the newest line and follow again |
 | Left / Right | — | Shift long lines sideways, 8 columns at a time (the timestamp stays put) |
@@ -491,7 +490,7 @@ It checks:
 
 - **Screen:** the help bar, the backlog window and the rain.
 - **Modes and keys:** switching to tail mode and back, and an `ack` rule with
-  the `a` key.
+  the `A` key.
 - **Restore:** the terminal is usable again after `q`, Ctrl-C, SIGTERM, SIGHUP
   and a panic. The panic case uses `examples/panic_restore.rs`.
 - **Cleanup:** child processes are stopped.
