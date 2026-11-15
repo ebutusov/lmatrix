@@ -16,7 +16,7 @@ pub const DISSOLVE_TIME: Duration = Duration::from_millis(1500);
 /// Maximum number of lines waiting for a free row.
 pub const MAX_PENDING: usize = 50;
 /// Marker appended to lines that wait for acknowledgement.
-pub const ACK_MARKER: &str = " [a]";
+pub const ACK_MARKER: &str = " [A]";
 /// Maximum number of new lines waiting for the next tick (bounds memory
 /// while frozen or under a flood of matching lines).
 pub const MAX_INCOMING: usize = 256;
@@ -62,7 +62,7 @@ impl CaughtLine {
 		self.hold == Hold::UntilAck && self.dissolve_start.is_none()
 	}
 
-	/// Range of `chars` holding the `[a]` marker, for ack lines.
+	/// Range of `chars` holding the `[A]` marker, for ack lines.
 	pub fn marker_range(&self) -> Option<std::ops::Range<usize>> {
 		if self.hold == Hold::UntilAck && self.chars.len() >= 3 {
 			Some(self.chars.len() - 3..self.chars.len())
@@ -205,39 +205,12 @@ impl Caught {
 		}
 	}
 
-	/// Acknowledges the oldest waiting line.
-	pub fn ack_oldest(&mut self, now: Duration) {
-		if let Some(line) = self
-			.lines
-			.iter_mut()
-			.filter(|line| line.waiting())
-			.min_by_key(|line| line.seq)
-		{
-			line.dissolve_start = Some(now);
-			return;
-		}
-		// Not on screen yet: the oldest waiting line is in a queue. It would
-		// dissolve at once, so it is dropped.
-		let oldest_queued = self
-			.incoming
-			.iter()
-			.chain(self.pending.iter())
-			.filter(|line| line.waiting())
-			.map(|line| line.seq)
-			.min();
-		if let Some(seq) = oldest_queued {
-			self.incoming.retain(|line| line.seq != seq);
-			self.pending.retain(|line| line.seq != seq);
-		}
-	}
-
-	/// Acknowledges every waiting line. Queued ack lines are dropped.
-	pub fn ack_all(&mut self, now: Duration) {
+	/// Acknowledges every waiting line on screen. Queued lines are kept and
+	/// take the freed rows as the acknowledged lines dissolve.
+	pub fn ack_visible(&mut self, now: Duration) {
 		for line in self.lines.iter_mut().filter(|line| line.waiting()) {
 			line.dissolve_start = Some(now);
 		}
-		self.incoming.retain(|line| !line.waiting());
-		self.pending.retain(|line| !line.waiting());
 	}
 
 	/// Re-lays out lines for a new size; lines that no longer fit are moved.
