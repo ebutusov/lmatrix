@@ -328,7 +328,10 @@ impl App {
 			Mode::Tail => {
 				let visible_rows = self.layout.rows.saturating_sub(1) as usize;
 				self.tail.update(self.sim.backlog());
-				if self.tail.handle_key(key, self.sim.backlog(), visible_rows) == TailAction::Leave
+				if self
+					.tail
+					.handle_key(key, self.sim.backlog(), visible_rows, self.layout.cols)
+					== TailAction::Leave
 				{
 					self.mode = Mode::Rain;
 				}
@@ -444,6 +447,7 @@ impl App {
 					&style,
 					&self.palette,
 					self.ascii_only,
+					0,
 				),
 				None => self.frame.fill_row(
 					screen_row,

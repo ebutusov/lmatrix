@@ -73,6 +73,7 @@ lmatrix --check
 | `A` | Acknowledge all waiting lines | — |
 | Up / Down, PgUp / PgDn, Home | — | Scroll (stops following) |
 | End or `G` | — | Jump to the newest line and follow again |
+| Left / Right | — | Shift long lines sideways, 8 columns at a time (the timestamp stays put) |
 | `/` | — | Type a filter regex: Enter applies it, Esc cancels |
 | Esc | — | Clear the active filter |
 | `q`, Ctrl-C | Quit | Quit |
