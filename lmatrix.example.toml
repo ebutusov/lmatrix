@@ -9,8 +9,9 @@
 # Durations are written like "480ms", "5s", "2m". Colors are "#rrggbb".
 
 [display]
-fps = 20                  # frames per second, 5..60
-color = "auto"            # auto | truecolor | 256 | 16
+title = "lmatrix"         # shown as *title* at the left of the top bar; "" hides it
+fps = 60                  # frames per second, 5..60
+color = "truecolor"       # auto | truecolor | 256 | 16
                           # auto: COLORTERM=truecolor/24bit -> truecolor,
                           # TERM contains 256color -> 256, otherwise 16.
                           # COLORTERM is often not forwarded over SSH:
@@ -20,8 +21,8 @@ ascii_only = false        # replace every non-ASCII character with '?'
 window_lines = 2          # backlog window rows at the bottom, 0 hides it (0..20)
 
 [rain]
-speed = 16                # rows per second (0.5..200)
-speed_jitter = 0.35       # 0..0.9, random speed variation per drop
+speed = 12                # rows per second (0.5..200)
+speed_jitter = 0.3        # 0..0.9, random speed variation per drop
 fill = 0.35               # 0.01..1.0, share of columns with an active drop
 fade_half_life = "1s"  # brightness half-life of a written cell (10ms..60s)
 replay = true             # replay old lines when live lines do not fill the rain

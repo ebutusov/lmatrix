@@ -66,8 +66,8 @@ pub struct SimSettings {
 impl Default for SimSettings {
 	fn default() -> Self {
 		Self {
-			speed: 16.0,
-			speed_jitter: 0.35,
+			speed: 12.0,
+			speed_jitter: 0.3,
 			fill: 0.35,
 			fade_half_life: Duration::from_millis(480),
 			replay: true,

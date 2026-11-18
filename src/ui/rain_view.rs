@@ -13,6 +13,15 @@ const HEAD_LEVEL: f32 = 0.95;
 
 pub const RAIN_HELP: &str = "[enter] tail  [space] freeze  [A] ack  [q] quit";
 
+/// Prefixes help bar text with the window title, decorated as `*title*`.
+pub fn with_title(title: &str, text: String) -> String {
+	if title.is_empty() {
+		text
+	} else {
+		format!("*{title}*  {text}")
+	}
+}
+
 /// Draws a help bar on `row`: `left` text, and `right` text in its own
 /// color aligned to the right edge.
 pub fn draw_help_bar(

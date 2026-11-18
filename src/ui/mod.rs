@@ -45,6 +45,8 @@ pub struct UiOptions {
 	pub color_mode: ColorMode,
 	pub window_lines: u16,
 	pub ascii_only: bool,
+	/// Name shown as `*title*` in the top bar; empty for none.
+	pub title: String,
 }
 
 /// All colors, converted for the active color mode.
@@ -149,6 +151,7 @@ struct App {
 	frozen: bool,
 	window_lines: u16,
 	ascii_only: bool,
+	title: String,
 	/// Newest backlog entries shown in the backlog window.
 	window_entries: Vec<Entry>,
 	window_refreshed: Option<Instant>,
@@ -179,6 +182,7 @@ pub fn run(
 		frozen: false,
 		window_lines: options.window_lines,
 		ascii_only: options.ascii_only,
+		title: options.title,
 		window_entries: Vec::new(),
 		window_refreshed: None,
 		quit: false,
@@ -376,6 +380,7 @@ impl App {
 					self.sim.rules(),
 					&self.palette,
 					self.ascii_only,
+					&self.title,
 				);
 			}
 		}
@@ -390,6 +395,7 @@ impl App {
 		} else {
 			rain_view::RAIN_HELP.to_string()
 		};
+		let help = rain_view::with_title(&self.title, help);
 		rain_view::draw_help_bar(&mut self.frame, 0, &help, right, &self.palette);
 		rain_view::draw_rain(
 			&mut self.frame,

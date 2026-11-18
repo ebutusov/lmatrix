@@ -42,9 +42,9 @@ check "rain area is not empty" '[ "$(screen | sed -n 2,22p | tr -d " \n" | wc -c
 
 # Enter switches to tail mode and back.
 tmux send-keys -t "$SESSION" Enter; sleep 0.5
-check "Enter switches to tail mode" '[[ "$(row 1)" == " TAIL"* ]]'
+check "Enter switches to tail mode" '[[ "$(row 1)" == " *lmatrix*  TAIL"* ]]'
 tmux send-keys -t "$SESSION" Enter; sleep 0.5
-check "Enter switches back to rain mode" '[[ "$(row 1)" == " [enter] tail"* ]]'
+check "Enter switches back to rain mode" '[[ "$(row 1)" == " *lmatrix*  [enter] tail"* ]]'
 
 # q restores the terminal.
 tmux send-keys -t "$SESSION" q; sleep 0.7

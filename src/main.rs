@@ -163,6 +163,7 @@ fn run(args: Args) -> Result<ExitCode> {
 		},
 		window_lines: config.display.window_lines,
 		ascii_only,
+		title: config.display.title.clone(),
 	};
 
 	let guard = TerminalGuard::enter()?;

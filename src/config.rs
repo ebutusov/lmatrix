@@ -33,6 +33,8 @@ pub struct DisplayConfig {
 	pub default_color: Rgb,
 	pub ascii_only: bool,
 	pub window_lines: u16,
+	/// Name shown as `*title*` at the left of the top bar; empty hides it.
+	pub title: String,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -192,15 +194,16 @@ impl Default for Config {
 	fn default() -> Self {
 		Self {
 			display: DisplayConfig {
-				fps: 20,
-				color: ColorChoice::Auto,
+				fps: 60,
+				color: ColorChoice::TrueColor,
 				default_color: Rgb(0x28, 0xff, 0x6e),
 				ascii_only: false,
 				window_lines: 2,
+				title: "lmatrix".to_string(),
 			},
 			rain: RainConfig {
-				speed: 16.0,
-				speed_jitter: 0.35,
+				speed: 12.0,
+				speed_jitter: 0.3,
 				fill: 0.35,
 				fade_half_life: Duration::from_secs(1),
 				replay: true,
@@ -353,6 +356,7 @@ struct RawDisplay {
 	default_color: Option<String>,
 	ascii_only: Option<bool>,
 	window_lines: Option<u16>,
+	title: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -569,6 +573,17 @@ impl RawConfig {
 					None => defaults.display.default_color,
 				},
 				ascii_only: raw.ascii_only.unwrap_or(defaults.display.ascii_only),
+				// The title goes to the terminal: drop control characters.
+				title: raw
+					.title
+					.map(|title| {
+						title
+							.chars()
+							.filter(|c| !c.is_control())
+							.collect::<String>()
+					})
+					.map(|title| title.trim().to_string())
+					.unwrap_or(defaults.display.title.clone()),
 				window_lines: check_range(
 					"display.window_lines",
 					raw.window_lines.unwrap_or(defaults.display.window_lines),
@@ -1084,6 +1099,8 @@ label = "ps"
 		assert!(error_of("[display]\nfps = 100\n").contains("display.fps"));
 		assert!(error_of("[display]\nfps = 1\n").contains("display.fps"));
 		assert!(error_of("[display]\nwindow_lines = 50\n").contains("display.window_lines"));
+		let config = Config::parse("[display]\ntitle = \" prod\\u001b[2J \"\n").unwrap();
+		assert_eq!(config.display.title, "prod[2J");
 		assert!(error_of("[rain]\nspeed_jitter = 0.95\n").contains("rain.speed_jitter"));
 		assert!(error_of("[rain]\nfill = 0\n").contains("rain.fill"));
 		assert!(error_of("[rain]\nfill = 1.5\n").contains("rain.fill"));

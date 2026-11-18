@@ -88,7 +88,7 @@ starts bright and loses half its brightness every `fade_half_life`. Below
 `min_brightness` it stops getting darker, and it disappears once it would
 have become too faint to see. So the length of a trail is roughly `speed` ×
 the time a character takes to fade out. With the defaults, a live trail is
-about 30 rows and a replayed one about 24. A log line that is shorter than
+about 22 rows and a replayed one about 18. A log line that is shorter than
 the screen repeats from its start, so the text never limits the trail.
 
 | To get | Change |
@@ -125,18 +125,19 @@ startup errors that name the offending key or rule. Colors are written
 
 | Key | Default | Meaning |
 |---|---|---|
-| `fps` | `20` | Frames per second, 5..60 |
-| `color` | `"auto"` | `auto`, `truecolor`, `256` or `16`; see [Color modes](#color-modes) |
+| `fps` | `60` | Frames per second, 5..60 |
+| `color` | `"truecolor"` | `auto`, `truecolor`, `256` or `16`; see [Color modes](#color-modes) |
 | `default_color` | `"#28ff6e"` | Rain color of lines that match no rule |
 | `ascii_only` | `false` | Replace every non-ASCII character with `?`, and truncate with `...` instead of `…` |
+| `title` | `"lmatrix"` | Name shown as `*title*` at the left of the top bar, to tell windows with different configs apart; `""` hides it |
 | `window_lines` | `2` | Rows of the backlog window at the bottom, 0..20; `0` hides it |
 
 ### `[rain]`
 
 | Key | Default | Meaning |
 |---|---|---|
-| `speed` | `16` | Rows per second, 0.5..200 |
-| `speed_jitter` | `0.35` | Random speed variation per drop, 0..0.9 |
+| `speed` | `12` | Rows per second, 0.5..200 |
+| `speed_jitter` | `0.3` | Random speed variation per drop, 0..0.9 |
 | `fill` | `0.35` | Share of columns that may carry an active drop, 0.01..1.0 |
 | `fade_half_life` | `"480ms"` | Brightness half-life of a written cell, 10ms..60s |
 | `replay` | `true` | Replay old lines when live lines do not fill the rain |
@@ -297,7 +298,8 @@ backlog window, but they never decode or ask for acknowledgement.
 
 ## Color modes
 
-With `color = "auto"`, lmatrix picks the mode from the environment:
+The default is `color = "truecolor"`. If colors look wrong, set it to `256`
+or `16`. With `color = "auto"`, lmatrix picks the mode from the environment:
 
 1. If `COLORTERM` is `truecolor` or `24bit`, it uses 24-bit color.
 2. Otherwise, if `TERM` contains `256color`, it uses the 256-color palette.

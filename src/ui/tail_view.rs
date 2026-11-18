@@ -6,7 +6,7 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use regex::Regex;
 
 use super::Palette;
-use super::rain_view::draw_help_bar;
+use super::rain_view::{draw_help_bar, with_title};
 use crate::backlog::{Backlog, Entry};
 use crate::line::truncate_with_ellipsis;
 use crate::rules::RuleSet;
@@ -333,6 +333,7 @@ impl TailView {
 		rules: &RuleSet,
 		palette: &Palette,
 		ascii_only: bool,
+		title: &str,
 	) {
 		let rows = frame.rows();
 		let visible_rows = rows.saturating_sub(1) as usize;
@@ -360,6 +361,7 @@ impl TailView {
 			} else {
 				format!("{} lines", self.len(backlog))
 			};
+			let left = with_title(title, left);
 			draw_help_bar(frame, 0, &left, Some((&count, palette.help_fg)), palette);
 		}
 
@@ -432,6 +434,7 @@ mod tests {
 			&RuleSet::default(),
 			&Palette::new(ColorMode::TrueColor),
 			false,
+			"",
 		);
 		(1..rows)
 			.map(|row| {
