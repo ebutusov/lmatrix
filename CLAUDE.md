@@ -51,4 +51,4 @@ Keep these boundaries: no `ratatui` and no async runtime (specs.md 10.3).
 
 ## E2E test
 
-`tests/e2e_tmux.sh` builds the binary and `examples/panic_restore.rs`, runs them in an 80×24 tmux session, and checks the screen with `tmux capture-pane -p`. It covers the help bar on row 1, the backlog window on the bottom rows, tail mode (row 1 starting with ` TAIL`), terminal restore after q, Ctrl-C, signals and a panic, child cleanup, escape stripping, resizing, and terminal loss. If you change screen layout or help-bar text, update the script's assertions.
+`tests/e2e_tmux.sh` builds the binary and `examples/panic_restore.rs`, runs them in an 80×24 tmux session, and checks the screen with `tmux capture-pane -p`. It covers the help bar on row 1, the backlog window on the bottom rows, tail mode (row 1 starting with ` *lmatrix*  TAIL` under the default title), terminal restore after q, Ctrl-C, signals and a panic, child cleanup, escape stripping, resizing, and terminal loss. If you change screen layout or help-bar text, update the script's assertions.

@@ -102,7 +102,7 @@ Every received line:
 A drop is one log line falling down one column.
 
 - A new drop starts at the top row of the rain area in a **random column that has no active drop**.
-- Its speed is `speed × uniform(1 − speed_jitter, 1 + speed_jitter)` rows per second. Defaults: `speed = 16`, `speed_jitter = 0.35`.
+- Its speed is `speed × uniform(1 − speed_jitter, 1 + speed_jitter)` rows per second. Defaults: `speed = 12`, `speed_jitter = 0.3`.
 - Each time the drop advances one row, it writes the next character of its text into that cell.
   - A space in the text is written as a space, so words stay readable. It overwrites the cell like any other character.
   - If the text is shorter than the rain area, it wraps around and continues from its first character.
@@ -249,7 +249,7 @@ Each source runs in its own thread and sends lines over a bounded channel (capac
 
 ### 7.2 Color modes
 
-`display.color` selects the mode; `auto` (default) detects it:
+`display.color` selects the mode (default `truecolor`); `auto` detects it:
 
 1. `COLORTERM` is `truecolor` or `24bit` → 24-bit color.
 2. Otherwise `TERM` contains `256color` → 256 colors.
@@ -264,7 +264,7 @@ Each source runs in its own thread and sends lines over a bounded channel (capac
 
 - Keep a buffer of the previous frame and write only cells that changed. Compare **after** color quantization, so that brightness changes that land on the same palette entry cause no output.
 - Build each frame's output in memory and write it with a single flush, wrapped in the synchronized-output sequences (`CSI ? 2026 h` / `l`).
-- Default 20 frames per second (`display.fps`, allowed range 5 to 60).
+- Default 60 frames per second (`display.fps`, allowed range 5 to 60).
 - On resize: rebuild the buffers, redraw fully, drop any active drop whose column no longer exists, and re-place caught lines that no longer fit.
 - If the terminal is smaller than 20 columns by 6 rows, show only the message `terminal too small` until it grows.
 
@@ -312,15 +312,16 @@ Log text is untrusted and must never reach the terminal raw.
 
 ```toml
 [display]
-fps = 20                  # 5..60
-color = "auto"            # auto | truecolor | 256 | 16
+title = "lmatrix"         # shown as *title* in the top bar, "" hides it
+fps = 60                  # 5..60
+color = "truecolor"       # auto | truecolor | 256 | 16
 default_color = "#28ff6e"
 ascii_only = false
 window_lines = 2          # backlog window rows at the bottom, 0 hides it
 
 [rain]
-speed = 16                # rows per second
-speed_jitter = 0.35       # 0..0.9, random variation per drop
+speed = 12                # rows per second
+speed_jitter = 0.3        # 0..0.9, random variation per drop
 fill = 0.35               # 0.01..1.0, share of columns with an active drop
 fade_half_life = "480ms"
 replay = true
